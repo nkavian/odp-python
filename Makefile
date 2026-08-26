@@ -1,4 +1,4 @@
-.PHONY: build consumer-smoke format format-check lint sync test typecheck verify
+.PHONY: build conformance consumer-smoke format format-check interoperability lint sync test typecheck verify
 
 sync:
 	uv sync --all-groups --locked
@@ -26,5 +26,11 @@ build:
 
 consumer-smoke: build
 	./scripts/verify-consumer.sh
+
+conformance:
+	./scripts/run-conformance.sh
+
+interoperability:
+	./scripts/run-node-interoperability.sh
 
 verify: lint typecheck test consumer-smoke
