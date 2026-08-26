@@ -1,0 +1,92 @@
+[build-system]
+requires = ["hatchling==1.32.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "offering-protocol"
+version = "0.1.0"
+description = "Official Python SDK for the Offering Discovery Protocol"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+  { name = "Nas Kavian", email = "nas@inflowpay.ai" },
+]
+keywords = ["agent", "discovery", "odp", "offering", "protocol"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Typing :: Typed",
+]
+dependencies = []
+
+[project.urls]
+Documentation = "https://www.offeringprotocol.org/"
+Issues = "https://github.com/offering-protocol/odp-python/issues"
+Repository = "https://github.com/offering-protocol/odp-python"
+
+[dependency-groups]
+dev = [
+  "build==1.5.0",
+  "mypy==2.3.1",
+  "pytest==9.1.1",
+  "pytest-cov==7.1.0",
+  "ruff==0.16.4",
+  "twine==7.0.0",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/LICENSE",
+  "/README.md",
+  "/src",
+]
+exclude = ["/.gitignore"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/offering_protocol"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+addopts = [
+  "--cov=offering_protocol",
+  "--cov-branch",
+  "--cov-fail-under=100",
+  "--cov-report=term-missing",
+  "--cov-report=xml",
+  "--strict-config",
+  "--strict-markers",
+]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["offering_protocol"]
+
+[tool.coverage.report]
+exclude_also = [
+  "if TYPE_CHECKING:",
+]
+show_missing = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "RUF", "SIM", "UP"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["offering_protocol"]
