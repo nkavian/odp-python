@@ -3,15 +3,20 @@
 [![CI](https://github.com/offering-protocol/odp-python/actions/workflows/ci.yml/badge.svg)](https://github.com/offering-protocol/odp-python/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![PyPI](https://img.shields.io/pypi/v/offering-protocol)](https://pypi.org/project/offering-protocol/)
+[![Codecov](https://codecov.io/gh/offering-protocol/odp-python/graph/badge.svg)](https://codecov.io/gh/offering-protocol/odp-python)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
 Official Python software development kit for the
 [Offering Discovery Protocol](https://www.offeringprotocol.org/), the open protocol for discovering
 Services and navigating their Offerings.
 
-ODP separates Service discovery from catalog discovery. An Agent searches the canonical Directory
-for candidate Services, inspects each Service's live ODP document, and then navigates or searches
-that Service's Collections and Offerings.
+ODP separates two levels of discovery:
+
+1. An Agent searches the canonical Directory for Services.
+2. The Agent inspects a Service's live ODP document and navigates that Service's Collections and
+   Offerings.
+
+The Directory does not copy every Service catalog. Catalog searches go directly to each Service.
 
 ## Installation
 
@@ -19,30 +24,263 @@ that Service's Collections and Offerings.
 python -m pip install offering-protocol
 ```
 
-The distribution provides one typed Python package with modules for each integration role:
+Python 3.11 or newer is required. The distribution provides one typed package with modules for each
+integration role:
 
-| Goal                                          | Module                        |
-| --------------------------------------------- | ----------------------------- |
-| Work with protocol models and validation      | `offering_protocol.core`      |
-| Search the canonical Directory                | `offering_protocol.directory` |
-| Discover Services and navigate their catalogs | `offering_protocol.agent`     |
-| Publish an ODP Service                        | `offering_protocol.service`   |
+| Goal | Module |
+| --- | --- |
+| Parse protocol models and validate normative documents | `offering_protocol.core` |
+| Search the canonical production or sandbox Directory | `offering_protocol.directory` |
+| Inspect Services and navigate their catalogs | `offering_protocol.agent` |
+| Publish an ODP Service | `offering_protocol.service` |
 
-The dependency direction remains narrow: Core is transport-independent, Directory depends toward
-Core, Agent composes Core and Directory, and Service depends toward Core without depending on Agent
-behavior.
+## Search the Directory
+
+`DirectoryClient` uses the one canonical production Directory. Pass `Environment.SANDBOX` when
+working against InFlow's sandbox; the endpoint itself is not configurable.
+
+```python
+import asyncio
+
+from offering_protocol.directory import DirectoryClient, Environment, SearchRequest, ServiceFilters
+
+
+async def main() -> None:
+    async with DirectoryClient(Environment.PRODUCTION) as directory:
+        page = await directory.search(
+            SearchRequest(
+                query="indoor plants",
+                filters=ServiceFilters(keywords=["plants"]),
+                limit=20,
+            )
+        )
+        for service in page.items:
+            print(service.name, service.service_origin)
+
+        if page.next:
+            next_page = await directory.continue_search(page.next)
+            print(f"Next page contains {len(next_page.items)} Services")
+
+
+asyncio.run(main())
+```
+
+Use `search_services()` when the application wants bounded automatic pagination. Use `suggest()` to
+discover keyword completions supported by the Directory.
+
+## Inspect and navigate a Service
+
+`ServiceClient` checks the Service document before calling an operation. Calling an operation the
+Service does not advertise raises `UnsupportedOperationError` before a catalog request is sent.
+
+```python
+import asyncio
+
+from offering_protocol.agent import ServiceClient
+from offering_protocol.core import OfferingSearchRequest, Representation
+
+
+async def main() -> None:
+    async with ServiceClient("https://demo.inflowpay.ai") as service:
+        inspection = await service.inspect()
+        print(inspection.document.name)
+        print([operation.name.value for operation in inspection.document.operations])
+
+        page = await service.search_offerings(
+            OfferingSearchRequest(query="plant"),
+            Representation.TERSE,
+        )
+        for offering in page.items:
+            print(offering.id, offering.name, offering.price)
+
+        if page.items:
+            details = await service.get_offering_details(page.items[0].id)
+            for action in details.actions:
+                print(action.id, action.rel.value, action.authentication.value)
+
+
+asyncio.run(main())
+```
+
+`get_offering_details()` resolves and validates an Offering's Attribute Schema, normalizes usable
+Actions, and reports non-fatal issues separately from the Offering. `resolve_action()` resolves a
+specific Action's HTTP or OpenAPI target and request schema. It never calls the target, enrolls,
+authenticates, or pays.
+
+The Agent module also provides:
+
+- Collection list, get, search, and bounded traversal operations.
+- Offering list, get, search, collection listing, continuation, and bounded traversal operations.
+- Effective inline and linked Filter and Sort definitions for Service and Collection scopes.
+- Directory-to-Service federated Offering discovery through `Agent`.
+- Conditional request and representation caching with injectable `Cache` and `Transport` protocols.
+
+Default fallback cache lifetimes are four hours for Service documents, one hour for Collections,
+and five minutes for Offerings. HTTP cache directives take precedence. Provide distinct `transport`
+and `supporting_transport` instances when protocol resources and linked schemas require different
+credentials or network policy.
+
+### Search across Services
+
+`Agent` composes Directory search with bounded concurrent searches of the returned Services. A
+failure from one Service becomes an issue event instead of terminating results from the other
+Services.
+
+```python
+from offering_protocol.agent import Agent, FederatedSearchRequest
+from offering_protocol.core import OfferingSearchRequest
+from offering_protocol.directory import SearchRequest
+
+
+async with Agent() as agent:
+    events = await agent.search_offerings_across_services(
+        FederatedSearchRequest(
+            services=SearchRequest(query="plant stores"),
+            offerings=OfferingSearchRequest(query="rubber plant"),
+            max_services=20,
+            max_offerings_per_service=10,
+        )
+    )
+    for event in events:
+        if event.offering is not None:
+            print(event.service.name, event.offering.name)
+        else:
+            print(event.service.name, event.issue)
+```
+
+### Search capabilities and Actions
+
+Search capability resolution combines inline and linked Filter and Sort definitions into the
+effective definitions available at a Service or Collection scope:
+
+```python
+capabilities = await service.get_offering_search_capabilities()
+for identifier, definition in capabilities.filters.items():
+    print(identifier, definition.operators)
+for issue in capabilities.issues:
+    print(issue.message)
+```
+
+After selecting an Offering, resolve an advertised Action by its identifier:
+
+```python
+resolved = await service.resolve_action("rubber-plant", "purchase")
+if resolved.action.http is not None:
+    print(resolved.action.http.url)
+elif resolved.action.openapi is not None:
+    print(resolved.action.openapi.url)
+print(resolved.request_schema)
+```
+
+Resolution returns metadata only. The application decides whether to enroll, authenticate, pay, or
+invoke the resolved target.
+
+### Caching and HTTP transport
+
+`MemoryCache` is the default process-local cache. Implement the `Cache` protocol when representations
+must survive process restarts or share storage across workers. A custom `Transport` implements
+asynchronous `send()` and `aclose()` methods. Caller-provided caches and transports remain owned by
+the caller.
+
+The built-in HTTP transport resolves and validates every destination before connecting, pins the
+connection to a validated public address, does not inherit proxy settings from the environment, and
+sends supporting-document requests without credentials. A custom transport must preserve those ODP
+network and credential-isolation requirements. Local HTTP development is disabled by default; pass
+`allow_local_network=True` to `ServiceClient` only for an explicit `localhost`, `127.0.0.1`, or
+`[::1]` development Service.
+
+Attribute Schema resolution accepts JSON Schema Draft 2020-12, loads at most 16 documents through
+eight reference levels, and limits the complete schema graph to one mebibyte. Linked schema
+documents must use HTTPS. Cross-document schema composition uses `$ref`; `$dynamicRef` accepts only
+a fragment reference such as `#node`.
+
+## Publish a Service
+
+`Service` is framework-neutral. Adapt the incoming framework request to `Request`, call
+`Service.handle()`, and copy the returned status, headers, and body into the framework response.
+
+```python
+from offering_protocol.core import Collection, Offering
+from offering_protocol.service import ServiceBuilder, StaticCatalog, StaticCatalogOptions
+
+catalog = StaticCatalog(
+    StaticCatalogOptions(
+        collections=(Collection(id="plants", name="Plants", odp_version="1.0"),),
+        offerings=(
+            Offering(
+                collection_ids=["plants"],
+                description="A resilient indoor plant.",
+                id="rubber-plant",
+                name="Rubber Plant",
+                odp_version="1.0",
+            ),
+        ),
+    )
+)
+
+service = (
+    ServiceBuilder(
+        name="Indica Flowers",
+        description="An AI-enabled store for houseplants and plant care.",
+        language="en",
+        endpoint_base="/odp",
+    )
+    .keywords(["houseplants", "indoor-plants"])
+    .website_url("https://example.com")
+    .build(catalog)
+)
+```
+
+Every Service integration must implement `list-offerings` and `get-offering`. `StaticCatalog` is the
+small-Service implementation: it adds Collection operations when Collections are provided and uses
+integrity-protected, stateless continuations that expire after one hour. Larger Services can
+implement the typed `Catalog` protocol over their existing indexed catalog and search infrastructure.
+
+Service responses are validated against the bundled normative schemas before they are returned.
+The handler enforces fixed operation paths and methods, ODP media types, request and response byte
+limits, local identifiers, page limits, and protocol Problem Details.
+
+See [examples/README.md](./examples/README.md) for a runnable Service and Agent.
 
 ## Protocol composition
 
-ODP discovers what a Service offers and how an Agent can act on an Offering. A Service Document and
+ODP discovers what a Service offers and how an Agent can act on an Offering. A Service document and
 its Actions can advertise AEP enrollment and MPP or x402 payment requirements, but ODP does not
 create credentials, invoke Actions, or submit payments. Applications compose the appropriate
-enrollment and payment clients around an Action resolved through ODP.
+enrollment and payment client around an Action resolved through ODP.
+
+## Errors and validation
+
+Each role exposes typed errors:
+
+- `OdpValidationError` includes deterministic schema and semantic issues.
+- `DirectoryError` and `DirectoryRequestError` describe canonical Directory failures.
+- `AgentError`, `ServiceRequestError`, and `UnsupportedOperationError` describe Agent-side failures.
+- `ServiceError`, `CatalogError`, and `RequestError` describe Service integration failures.
+
+Protocol models preserve additive members in `model.additional` and round-trip them through
+`model.to_dict()`. Parsing remains strict for normative constraints and fields that prohibit unknown
+members.
+
+Handle the narrowest error that the application can act upon and use the role's base error for the
+remaining failures:
+
+```python
+from offering_protocol.agent import AgentError, ServiceRequestError, UnsupportedOperationError
+
+try:
+    offering = await service.get_offering("rubber-plant")
+except UnsupportedOperationError as error:
+    print(f"Service does not advertise {error.operation.value}")
+except ServiceRequestError as error:
+    print(error.status, error.headers)
+except AgentError as error:
+    print(error)
+```
 
 ## Development
 
-Python 3.11 or newer and [uv](https://docs.astral.sh/uv/) are required. Install the locked development
-environment and run the complete merge gate with:
+Python 3.11 or newer and [uv](https://docs.astral.sh/uv/) are required.
 
 ```sh
 make sync
@@ -55,8 +293,24 @@ Format source files with:
 make format
 ```
 
-The merge gate checks formatting, linting, strict type checking, branch coverage, distribution
-metadata, and installation of the built wheel into a clean virtual environment.
+The merge gate checks formatting, linting, strict type checking, 100 percent line and branch
+coverage, distribution metadata, bundled runtime schemas, and installation of the built wheel into
+a clean virtual environment.
+
+Generate Agent and Service conformance reports with:
+
+```sh
+ODP_SPECS_DIR=/path/to/odp-specs make conformance
+```
+
+The language-neutral harness executes the package's public behavior and writes release evidence to
+`.conformance/reports/`.
+
+Run the Python Agent against the Node.js reference Service with:
+
+```sh
+ODP_NODE_DIR=/path/to/odp-node make interoperability
+```
 
 See [`odp-specs`](https://github.com/offering-protocol/odp-specs) for the normative draft, schemas,
 examples, and test vectors.
@@ -69,7 +323,7 @@ See [SECURITY.md](./SECURITY.md) for vulnerability reporting.
 
 Maintainers run the `Release` workflow from `main`. It verifies the package and a clean consumer,
 publishes through PyPI Trusted Publishing, attests the distributions, and creates the matching tag
-and GitHub release.
+and GitHub release with Agent and Service conformance reports.
 
 ## License
 

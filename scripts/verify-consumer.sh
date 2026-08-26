@@ -37,4 +37,20 @@ assert agent.__name__ == "offering_protocol.agent"
 assert core.__name__ == "offering_protocol.core"
 assert directory.__name__ == "offering_protocol.directory"
 assert service.__name__ == "offering_protocol.service"
+document = core.parse_service_document(
+    b'{"description":"Consumer smoke test","http":{"endpoint_base":"/odp"},'
+    b'"language":"en","localizations":["en"],"name":"Consumer",'
+    b'"odp_version":"1.0","operations":[{"authentication":"not-required",'
+    b'"name":"get-offering"},{"authentication":"not-required",'
+    b'"name":"list-offerings"}]}'
+)
+assert document.name == "Consumer"
+try:
+    core.parse_resource_identity(
+        b'{"id":"plant","service":"not a URI","type":"offering"}'
+    )
+except core.OdpValidationError:
+    pass
+else:
+    raise AssertionError("URI format validation is unavailable")
 PY
