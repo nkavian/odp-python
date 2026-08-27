@@ -31,6 +31,7 @@ from offering_protocol.core import (
     ServiceDocument,
     ServiceOpenApi,
     ServiceProtocols,
+    TrustProtocol,
     is_local_resource_identifier,
     parse_collection,
     parse_collection_page,
@@ -155,13 +156,18 @@ class ServiceBuilder:
         return self._updated(payment_origins=values)
 
     def protocols(
-        self, enrollment: list[EnrollmentProtocol], payments: list[PaymentProtocol]
+        self,
+        enrollment: list[EnrollmentProtocol],
+        payments: list[PaymentProtocol],
+        trust: list[TrustProtocol] | None = None,
     ) -> ServiceBuilder:
         values: dict[str, object] = {}
         if enrollment:
             values["enrollment"] = enrollment
         if payments:
             values["payments"] = payments
+        if trust:
+            values["trust"] = trust
         return self._updated(protocols=ServiceProtocols.model_validate(values))
 
     def search_capabilities(self, value: SearchCapabilities) -> ServiceBuilder:

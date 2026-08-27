@@ -85,6 +85,8 @@ async def main() -> None:
         inspection = await service.inspect()
         print(inspection.document.name)
         print([operation.name.value for operation in inspection.document.operations])
+        protocols = inspection.document.protocols
+        print([protocol.name.value for protocol in protocols.trust] if protocols else [])
 
         page = await service.search_offerings(
             OfferingSearchRequest(query="plant"),
@@ -200,7 +202,7 @@ a fragment reference such as `#node`.
 `Service.handle()`, and copy the returned status, headers, and body into the framework response.
 
 ```python
-from offering_protocol.core import Collection, Offering
+from offering_protocol.core import Collection, Offering, Protocol, TrustProtocol
 from offering_protocol.service import ServiceBuilder, StaticCatalog, StaticCatalogOptions
 
 catalog = StaticCatalog(
@@ -226,6 +228,7 @@ service = (
         endpoint_base="/odp",
     )
     .keywords(["houseplants", "indoor-plants"])
+    .protocols([], [], [TrustProtocol(name=Protocol.TAP)])
     .website_url("https://example.com")
     .build(catalog)
 )
@@ -245,9 +248,9 @@ See [examples/README.md](./examples/README.md) for a runnable Service and Agent.
 ## Protocol composition
 
 ODP discovers what a Service offers and how an Agent can act on an Offering. A Service document and
-its Actions can advertise AEP enrollment and MPP or x402 payment requirements, but ODP does not
-create credentials, invoke Actions, or submit payments. Applications compose the appropriate
-enrollment and payment client around an Action resolved through ODP.
+its Actions can advertise enrollment, payment, and trust protocols, but ODP does not create
+credentials, invoke Actions, submit payments, or implement trust protocols. Applications compose
+the appropriate protocol clients around an Action resolved through ODP.
 
 ## Errors and validation
 
