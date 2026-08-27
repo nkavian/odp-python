@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
@@ -74,8 +75,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    server = ThreadingHTTPServer(("127.0.0.1", 4103), Handler)
-    print("ODP Service listening at http://127.0.0.1:4103")
+    port = int(os.environ.get("PORT", "4103"))
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    print(f"ODP Service listening at http://127.0.0.1:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
