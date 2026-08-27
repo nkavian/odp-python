@@ -18,6 +18,7 @@ from offering_protocol.core import (
     PaymentProtocol,
     Protocol,
     Representation,
+    TrustProtocol,
 )
 from offering_protocol.service import (
     MEDIA_TYPE,
@@ -76,7 +77,11 @@ def _service(catalog: Catalog | None = None) -> Service:
         .status_url("/status")
         .payment_origins(["https://demo.inflowpay.ai"])
         .operation_authentication(Operation.GET_OFFERING, AuthenticationRequirement.REQUIRED)
-        .protocols([EnrollmentProtocol(name=Protocol.AEP)], [])
+        .protocols(
+            [EnrollmentProtocol(name=Protocol.AEP)],
+            [],
+            [TrustProtocol(name=Protocol.TAP)],
+        )
         .build(catalog or _catalog())
     )
 
@@ -87,6 +92,7 @@ async def test_serves_document_offerings_and_collections() -> None:
     document = await service.handle(Request("GET", "/.well-known/odp"))
     assert document.status == 200
     assert json.loads(document.body)["name"] == "Indica Flowers"
+    assert json.loads(document.body)["protocols"]["trust"] == [{"name": "tap"}]
     assert service.document.operations[0].authentication is AuthenticationRequirement.REQUIRED
     offerings = await service.handle(
         Request("GET", "/odp/offerings", headers={"Accept": MEDIA_TYPE}, query="limit=1")

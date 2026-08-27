@@ -52,6 +52,7 @@ from offering_protocol.core import (
     MissingPlacement,
     OfferingSearchRequest,
     OpenApiActionTarget,
+    Protocol,
     SearchCapabilities,
     SortCapabilitySource,
     SortDefinition,
@@ -99,6 +100,8 @@ async def test_inspects_support_before_fetching_and_caches_document() -> None:
     first = await client.inspect()
     second = await client.inspect()
     assert first.freshness is Freshness.FETCHED
+    assert first.document.protocols is not None
+    assert first.document.protocols.trust[0].name is Protocol.TAP
     assert second.freshness is Freshness.FRESH
     assert (await client.get_offering("rubber-plant")).name == "Rubber Plant"
     assert transport.requests[-1].url.endswith("/odp/offerings/rubber-plant?representation=full")

@@ -41,7 +41,8 @@ SERVICE_DOCUMENT = """{
   "operations":[
     {"authentication":"not-required","name":"get-offering"},
     {"authentication":"not-required","name":"list-offerings"}
-  ]
+  ],
+  "protocols":{"trust":[{"name":"tap"}]}
 }"""
 
 OFFERING = """{
