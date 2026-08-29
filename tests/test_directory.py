@@ -72,6 +72,44 @@ async def test_search_services_is_bounded_and_suggestions_are_typed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_search_filters_unknown_protocols_and_rejects_malformed_known() -> None:
+    protocols = (
+        '"protocols":{"enrollment":[{"name":"future-enrollment"}],'
+        '"payments":[{"authentication":"not-required","name":"future-payment"},'
+        '{"authentication":"not-required","name":"mpp"}],'
+        '"trust":[{"name":"future-trust"},{"name":"tap"}]},'
+    )
+    candidate = DIRECTORY_PAGE.replace('"items":[{', '"items":[{' + protocols)
+    page = await DirectoryClient(
+        transport=QueueTransport(response(candidate, content_type="application/json"))
+    ).search(SearchRequest())
+    parsed = page.items[0].protocols
+    assert parsed is not None
+    assert not parsed.enrollment
+    assert [value.name for value in parsed.payments] == ["mpp"]
+    assert [value.name for value in parsed.trust] == ["tap"]
+
+    known_payments = (
+        '"payments":[{"authentication":"not-required","name":"future-payment"},'
+        '{"authentication":"not-required","name":"mpp"}],'
+    )
+    unknown_only = candidate.replace(
+        known_payments,
+        '"payments":[{"authentication":"not-required","name":"future-payment"}],',
+    ).replace(',{"name":"tap"}', "")
+    page = await DirectoryClient(
+        transport=QueueTransport(response(unknown_only, content_type="application/json"))
+    ).search(SearchRequest())
+    assert page.items[0].protocols is None
+
+    malformed = candidate.replace('"name":"mpp"', '"name":"mpp","extra":true')
+    with pytest.raises(DirectoryError):
+        await DirectoryClient(
+            transport=QueueTransport(response(malformed, content_type="application/json"))
+        ).search(SearchRequest())
+
+
+@pytest.mark.asyncio
 async def test_follows_same_origin_redirect_and_changes_post_to_get() -> None:
     transport = QueueTransport(
         response(b"", headers={"location": "/redirect"}, status=303),

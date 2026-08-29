@@ -7,7 +7,11 @@ from urllib.parse import urlencode, urljoin
 
 from pydantic import ValidationError as ModelValidationError
 
-from offering_protocol.core import derive_service_origin
+from offering_protocol.core import (
+    OdpValidationError,
+    derive_service_origin,
+    parse_agent_service_document,
+)
 from offering_protocol.directory.models import (
     DirectoryService,
     Environment,
@@ -159,8 +163,18 @@ class DirectoryClient:
 
 def _parse_search_page(body: bytes) -> SearchPage:
     try:
-        page = SearchPage.model_validate_json(body)
-    except ModelValidationError as error:
+        raw = json.loads(body)
+        if isinstance(raw, dict) and isinstance(raw.get("items"), list):
+            for item in raw["items"]:
+                if isinstance(item, dict) and "protocols" in item:
+                    _normalize_service_protocols(item)
+        page = SearchPage.model_validate(raw)
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ModelValidationError,
+        OdpValidationError,
+    ) as error:
         raise DirectoryError(f"invalid Directory response: {error}") from error
     if len(page.items) > 100:
         raise DirectoryError("Directory search page exceeds 100 Services")
@@ -168,6 +182,27 @@ def _parse_search_page(body: bytes) -> SearchPage:
         if derive_service_origin(service.service_origin) != service.service_origin:
             raise DirectoryError("Directory Service origin is not canonical")
     return page
+
+
+def _normalize_service_protocols(item: dict[str, object]) -> None:
+    candidate = {
+        "description": "Directory protocol validation",
+        "http": {"endpoint_base": "/"},
+        "language": "en",
+        "localizations": ["en"],
+        "name": "Directory Service",
+        "odp_version": "1.0",
+        "operations": [
+            {"authentication": "not-required", "name": "get-offering"},
+            {"authentication": "not-required", "name": "list-offerings"},
+        ],
+        "protocols": item["protocols"],
+    }
+    document = parse_agent_service_document(json.dumps(candidate, separators=(",", ":")))
+    if document.protocols is None:
+        item.pop("protocols")
+    else:
+        item["protocols"] = document.protocols.model_dump(mode="json", exclude_defaults=True)
 
 
 def _validate_search_request(request: SearchRequest) -> None:

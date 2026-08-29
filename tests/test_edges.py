@@ -19,7 +19,11 @@ from offering_protocol.agent.client import (
     _cacheable,
     _expiration,
     _has_freshness,
+    _normalize_body,
     _operation_parser,
+)
+from offering_protocol.agent.client import (
+    parse_collection as parse_agent_collection,
 )
 from offering_protocol.core import (
     Action,
@@ -42,7 +46,6 @@ from offering_protocol.core import (
     ServiceBrandingImage,
     ServiceOpenApi,
     build_operation_url,
-    parse_collection,
     parse_filter_definition,
     parse_offering,
     parse_service_document,
@@ -339,7 +342,8 @@ async def test_agent_collection_search_and_cache_header_edges() -> None:
     ) == now + timedelta(seconds=7)
     assert _expiration({"expires": "Wed, 21 Oct 2037 07:28:00 GMT"}, timedelta(), now).year == 2037
     assert _expiration({"expires": "bad"}, timedelta(seconds=2), now) == now + timedelta(seconds=2)
-    assert _operation_parser(Operation.GET_COLLECTION) is parse_collection
+    assert _operation_parser(Operation.GET_COLLECTION) is parse_agent_collection
+    assert _normalize_body(b"[]", "collection") == "[]"
 
 
 @pytest.mark.asyncio

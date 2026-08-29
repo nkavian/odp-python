@@ -16,6 +16,7 @@ from offering_protocol.core.references import (
 from offering_protocol.core.validation import (
     OdpValidationError,
     ValidationIssue,
+    parse_agent_service_document,
     parse_collection,
     parse_collection_page,
     parse_collection_search_request,
@@ -44,6 +45,7 @@ __all__ = [
     "is_local_resource_identifier",
     "operation_method",
     "operation_path",
+    "parse_agent_service_document",
     "parse_collection",
     "parse_collection_page",
     "parse_collection_search_request",

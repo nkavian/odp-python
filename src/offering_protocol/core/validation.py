@@ -82,6 +82,363 @@ def parse_service_document(data: bytes | str) -> ServiceDocument:
     return value
 
 
+def parse_agent_service_document(data: bytes | str) -> ServiceDocument:
+    try:
+        raw = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return parse_service_document(data)
+    if isinstance(raw, dict):
+        raw = _normalize_agent_response(raw, "service-document")
+    return parse_service_document(json.dumps(raw, separators=(",", ":")))
+
+
+def _normalize_agent_response(value: dict[str, Any], kind: str) -> dict[str, Any]:
+    normalized = dict(value)
+    if kind == "service-document":
+        _filter_agent_protocols(normalized)
+        protocols = normalized.get("protocols")
+        if isinstance(protocols, dict):
+            _filter_unknown_authentication(protocols, "payments")
+        _filter_named_list(
+            normalized,
+            "operations",
+            {
+                "get-collection",
+                "get-offering",
+                "list-collection-offerings",
+                "list-collections",
+                "list-offerings",
+                "search-collections",
+                "search-offerings",
+            },
+        )
+        _filter_unknown_authentication(normalized, "operations")
+        _filter_typed_list(normalized, "mcp", {"streamable-http"})
+        _filter_closed_object_list(normalized, "operations", {"authentication", "name"})
+        _filter_closed_object_list(normalized, "mcp", {"description", "name", "type", "url"})
+        _filter_payment_options(normalized)
+        _normalize_branding(normalized)
+        _normalize_search_capabilities(normalized)
+    elif kind in {"collection", "offering"}:
+        _filter_typed_list(
+            normalized,
+            "images",
+            {"image/avif", "image/jpeg", "image/png", "image/svg+xml", "image/webp"},
+        )
+        _strip_object_list(normalized, "images", {"alt", "height", "src", "type", "width"})
+        _normalize_search_capabilities(normalized)
+        if kind == "offering":
+            _normalize_offering(normalized)
+    elif kind in {"collection-page", "offering-page"} and isinstance(normalized.get("items"), list):
+        item_kind = "offering" if kind == "offering-page" else "collection"
+        normalized["items"] = [
+            _normalize_agent_response(item, item_kind) if isinstance(item, dict) else item
+            for item in normalized["items"]
+        ]
+    elif kind in {"filter-page", "sort-page"} and isinstance(normalized.get("items"), list):
+        predicate = _known_filter if kind == "filter-page" else _known_sort
+        normalized["items"] = [item for item in normalized["items"] if predicate(item)]
+    elif kind == "problem" and isinstance(normalized.get("invalid_params"), list):
+        normalized["invalid_params"] = [
+            item
+            for item in normalized["invalid_params"]
+            if not (
+                isinstance(item, dict)
+                and isinstance(item.get("in"), str)
+                and item["in"] not in {"body", "header", "path", "query"}
+            )
+        ]
+    return normalized
+
+
+def _filter_named_list(value: dict[str, Any], member: str, recognized: set[str]) -> None:
+    items = value.get(member)
+    if not isinstance(items, list):
+        return
+    filtered = [
+        item
+        for item in items
+        if not (
+            isinstance(item, dict)
+            and isinstance(item.get("name"), str)
+            and item["name"] not in recognized
+        )
+    ]
+    if filtered:
+        value[member] = filtered
+    else:
+        value.pop(member, None)
+
+
+def _filter_typed_list(value: dict[str, Any], member: str, recognized: set[str]) -> None:
+    items = value.get(member)
+    if not isinstance(items, list):
+        return
+    filtered = [
+        item
+        for item in items
+        if not (
+            isinstance(item, dict)
+            and isinstance(item.get("type"), str)
+            and item["type"] not in recognized
+        )
+    ]
+    if filtered:
+        value[member] = filtered
+    else:
+        value.pop(member, None)
+
+
+def _filter_closed_object_list(value: dict[str, Any], member: str, allowed: set[str]) -> None:
+    items = value.get(member)
+    if not isinstance(items, list):
+        return
+    filtered = [
+        item for item in items if not isinstance(item, dict) or not set(item).difference(allowed)
+    ]
+    if filtered:
+        value[member] = filtered
+    else:
+        value.pop(member, None)
+
+
+def _filter_unknown_authentication(value: dict[str, Any], member: str) -> None:
+    items = value.get(member)
+    if not isinstance(items, list):
+        return
+    filtered = [
+        item
+        for item in items
+        if not isinstance(item, dict) or not _has_unknown_authentication(item)
+    ]
+    if filtered:
+        value[member] = filtered
+    else:
+        value.pop(member, None)
+
+
+def _has_unknown_authentication(value: dict[str, Any]) -> bool:
+    authentication = value.get("authentication")
+    return isinstance(authentication, str) and authentication not in {
+        "not-required",
+        "optional",
+        "required",
+    }
+
+
+def _strip_object_list(value: dict[str, Any], member: str, allowed: set[str]) -> None:
+    items = value.get(member)
+    if not isinstance(items, list):
+        return
+    value[member] = [
+        {key: entry for key, entry in item.items() if key in allowed}
+        if isinstance(item, dict)
+        else item
+        for item in items
+    ]
+
+
+def _filter_payment_options(value: dict[str, Any]) -> None:
+    protocols = value.get("protocols")
+    if not isinstance(protocols, dict) or not isinstance(protocols.get("payments"), list):
+        return
+    recognized = {
+        "algorand",
+        "aptos",
+        "arbitrum",
+        "avalanche",
+        "base",
+        "card",
+        "ethereum",
+        "hedera",
+        "inflow",
+        "lightning",
+        "polygon",
+        "solana",
+        "stellar",
+        "stripe",
+        "tempo",
+        "ton",
+    }
+    for payment in protocols["payments"]:
+        if not isinstance(payment, dict) or not isinstance(payment.get("options"), list):
+            continue
+        options = [
+            option
+            for option in payment["options"]
+            if not isinstance(option, str) or option in recognized
+        ]
+        if options:
+            payment["options"] = options
+        else:
+            payment.pop("options", None)
+
+
+def _normalize_branding(value: dict[str, Any]) -> None:
+    branding = value.get("branding")
+    if not isinstance(branding, dict):
+        return
+    normalized = {key: entry for key, entry in branding.items() if key in {"icon", "logo"}}
+    for member in ("icon", "logo"):
+        image = normalized.get(member)
+        if (
+            isinstance(image, dict)
+            and isinstance(image.get("type"), str)
+            and image["type"] not in {"image/png", "image/svg+xml", "image/webp"}
+        ):
+            normalized.pop(member, None)
+        elif isinstance(image, dict):
+            normalized[member] = {
+                key: entry for key, entry in image.items() if key in {"src", "type"}
+            }
+    if normalized:
+        value["branding"] = normalized
+    else:
+        value.pop("branding", None)
+
+
+def _normalize_search_capabilities(value: dict[str, Any]) -> None:
+    capabilities = value.get("search_capabilities")
+    if not isinstance(capabilities, dict):
+        return
+    normalized = dict(capabilities)
+    for member, predicate in (("filters", _known_filter), ("sorts", _known_sort)):
+        source = normalized.get(member)
+        if not isinstance(source, dict) or not isinstance(source.get("inline"), list):
+            continue
+        items = [item for item in source["inline"] if predicate(item)]
+        if items:
+            normalized[member] = {**source, "inline": items}
+        else:
+            normalized.pop(member, None)
+    if normalized:
+        value["search_capabilities"] = normalized
+    else:
+        value.pop("search_capabilities", None)
+
+
+def _normalize_offering(value: dict[str, Any]) -> None:
+    schema = value.get("schema")
+    if isinstance(schema, dict) and set(schema).difference({"url"}):
+        value.pop("schema", None)
+    price = value.get("price")
+    if (
+        isinstance(price, dict)
+        and isinstance(price.get("type"), str)
+        and price["type"] not in {"fixed", "free", "metered", "quote", "range", "starting_at"}
+    ):
+        value.pop("price", None)
+    actions = value.get("actions")
+    if not isinstance(actions, list):
+        return
+    filtered = []
+    for action in actions:
+        if isinstance(action, dict) and _has_unknown_authentication(action):
+            continue
+        if isinstance(action, dict) and set(action).difference(
+            {"authentication", "description", "http", "id", "openapi", "rel"}
+        ):
+            continue
+        http = action.get("http") if isinstance(action, dict) else None
+        if isinstance(http, dict) and set(http).difference(
+            {"href", "method", "request", "response_content_types"}
+        ):
+            continue
+        request = http.get("request") if isinstance(http, dict) else None
+        if isinstance(request, dict) and set(request).difference({"content_type", "schema"}):
+            continue
+        schema = request.get("schema") if isinstance(request, dict) else None
+        if isinstance(schema, dict) and set(schema).difference({"url"}):
+            continue
+        openapi = action.get("openapi") if isinstance(action, dict) else None
+        if isinstance(openapi, dict) and set(openapi).difference({"operation_id", "url"}):
+            continue
+        method = http.get("method") if isinstance(http, dict) else None
+        if isinstance(method, str) and method not in {"GET", "POST"}:
+            continue
+        filtered.append(action)
+    if filtered:
+        value["actions"] = filtered
+    else:
+        value.pop("actions", None)
+
+
+def _known_filter(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return True
+    if isinstance(value.get("type"), str) and value["type"] not in {
+        "boolean",
+        "date",
+        "date-time",
+        "decimal",
+        "integer",
+        "number",
+        "string",
+    }:
+        return False
+    operators = value.get("operators")
+    if isinstance(operators, list) and any(
+        isinstance(operator, str)
+        and operator not in {"eq", "exists", "gt", "gte", "in", "lt", "lte"}
+        for operator in operators
+    ):
+        return False
+    unit = value.get("unit")
+    return not (
+        isinstance(unit, dict)
+        and isinstance(unit.get("system"), str)
+        and unit["system"] not in {"service", "ucum"}
+    )
+
+
+def _known_sort(value: Any) -> bool:
+    if not isinstance(value, dict) or not isinstance(value.get("keys"), list):
+        return True
+    return not any(
+        isinstance(key, dict)
+        and (
+            (
+                isinstance(key.get("direction"), str)
+                and key["direction"] not in {"ascending", "descending"}
+            )
+            or (isinstance(key.get("missing"), str) and key["missing"] not in {"first", "last"})
+        )
+        for key in value["keys"]
+    )
+
+
+def _filter_agent_protocols(document: dict[str, Any]) -> None:
+    protocols = document.get("protocols")
+    if not isinstance(protocols, dict):
+        return
+    _filter_agent_protocol_category(protocols, "enrollment", {"aep"})
+    _filter_agent_protocol_category(protocols, "payments", {"mpp", "x402"})
+    _filter_agent_protocol_category(protocols, "trust", {"tap"})
+    if not protocols:
+        document.pop("protocols")
+
+
+def _filter_agent_protocol_category(
+    protocols: dict[str, Any], category: str, recognized: set[str]
+) -> None:
+    descriptors = protocols.get(category)
+    if not isinstance(descriptors, list):
+        return
+    filtered = [
+        descriptor
+        for descriptor in descriptors
+        if not (
+            isinstance(descriptor, dict)
+            and isinstance(descriptor.get("name"), str)
+            and descriptor["name"] not in recognized
+        )
+    ]
+    if descriptors and not filtered:
+        protocols.pop(category)
+    else:
+        protocols[category] = filtered
+
+
 def parse_collection(data: bytes | str) -> Collection:
     value = _parse(data, "collection.schema.json", "Collection", Collection)
     _validate_representation(
