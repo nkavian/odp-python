@@ -17,20 +17,26 @@ from offering_protocol.core import (
     Page,
     derive_service_origin,
     is_local_resource_identifier,
+    parse_agent_service_document,
     parse_collection,
+    parse_collection_page,
     parse_collection_search_request,
     parse_filter_definition,
+    parse_filter_definition_page,
     parse_offering,
     parse_offering_page,
     parse_offering_search_request,
+    parse_problem_details,
     parse_problem_response,
     parse_resource_identity,
     parse_service_document,
     parse_sort_definition,
+    parse_sort_definition_page,
     resolve_continuation,
     resolve_resource_reference,
     validate_value,
 )
+from offering_protocol.core.validation import _normalize_agent_response
 from offering_protocol.directory.transport import HttpRequest, HttpResponse
 from offering_protocol.service import CatalogRequest, Request, ServiceBuilder
 
@@ -265,6 +271,25 @@ async def evaluate_case(subject: str, case: dict[str, Any], role: str) -> bool |
             succeeds(lambda: parse_collection_search_request(json.dumps(case["request"])))
             == case["valid"]
         )
+    if subject == "composition-contract":
+        if case.get("operation") == "normalize-agent-response" and role == "agent":
+            normalized = _normalize_agent_response(case["document"], case["kind"])
+            _parse_agent_response(normalized, case["kind"])
+            return normalized == case["expected"]
+        if case.get("operation") == "validate-advertisement":
+            document = _service_document_with_protocols(case["protocols"])
+            return succeeds(lambda: parse_service_document(json.dumps(document))) == case["valid"]
+        if case.get("operation") == "filter-advertisement" and role == "agent":
+            document = parse_agent_service_document(
+                json.dumps(_service_document_with_protocols(case["protocols"]))
+            )
+            actual = (
+                document.protocols.model_dump(mode="json", exclude_defaults=True)
+                if document.protocols is not None
+                else {}
+            )
+            return actual == case["expected"]
+        return None
     if subject == "offering-search-contract" and case.get("operation") == "validate-request":
         return (
             succeeds(lambda: parse_offering_search_request(json.dumps(case["request"])))
@@ -306,6 +331,40 @@ async def evaluate_case(subject: str, case: dict[str, Any], role: str) -> bool |
         valid = valid and succeeds(lambda: parse_offering(json.dumps(case["get_response"])))
         return valid == case["valid"]
     return None
+
+
+def _parse_agent_response(document: dict[str, Any], kind: str) -> object:
+    encoded = json.dumps(document, separators=(",", ":"))
+    parsers: dict[str, Callable[[str], object]] = {
+        "service-document": parse_agent_service_document,
+        "collection": parse_collection,
+        "offering": parse_offering,
+        "collection-page": parse_collection_page,
+        "offering-page": parse_offering_page,
+        "filter-page": parse_filter_definition_page,
+        "sort-page": parse_sort_definition_page,
+        "problem": parse_problem_details,
+    }
+    parser = parsers.get(kind)
+    if parser is None:
+        raise ValueError("Unknown Agent response kind")
+    return parser(encoded)
+
+
+def _service_document_with_protocols(protocols: object) -> dict[str, object]:
+    return {
+        "description": "ODP Python conformance adapter",
+        "http": {"endpoint_base": "/odp"},
+        "language": "en",
+        "localizations": ["en"],
+        "name": "Conformance Service",
+        "odp_version": "1.0",
+        "operations": [
+            {"authentication": "not-required", "name": "get-offering"},
+            {"authentication": "not-required", "name": "list-offerings"},
+        ],
+        "protocols": protocols,
+    }
 
 
 async def evaluate(request: dict[str, Any]) -> dict[str, object]:

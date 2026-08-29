@@ -21,18 +21,30 @@ from offering_protocol.core import (
     OfferingSearchRequest,
     Operation,
     Page,
+    ProblemDetails,
     Representation,
     ServiceDocument,
     build_operation_url,
     derive_service_origin,
-    parse_collection,
-    parse_collection_page,
-    parse_offering,
-    parse_offering_page,
-    parse_problem_response,
-    parse_service_document,
+    parse_agent_service_document,
     resolve_continuation,
 )
+from offering_protocol.core import (
+    parse_collection as parse_collection_strict,
+)
+from offering_protocol.core import (
+    parse_collection_page as parse_collection_page_strict,
+)
+from offering_protocol.core import (
+    parse_offering as parse_offering_strict,
+)
+from offering_protocol.core import (
+    parse_offering_page as parse_offering_page_strict,
+)
+from offering_protocol.core import (
+    parse_problem_response as parse_problem_response_strict,
+)
+from offering_protocol.core.validation import _normalize_agent_response
 from offering_protocol.directory.transport import (
     HttpRequest,
     HttpResponse,
@@ -136,10 +148,10 @@ class ServiceClient:
             b"",
             _MAXIMUM_DOCUMENT_BYTES,
             self._cache_fallbacks.service_document,
-            parse_service_document,
+            parse_agent_service_document,
         )
         return Inspection(
-            document=parse_service_document(response.body),
+            document=parse_agent_service_document(response.body),
             final_url=response.final_url,
             freshness=response.freshness,
             requested_url=requested_url,
@@ -569,6 +581,33 @@ def _operation_parser(operation: Operation) -> object:
     if operation in {Operation.LIST_COLLECTIONS, Operation.SEARCH_COLLECTIONS}:
         return parse_collection_page
     return parse_offering_page
+
+
+def parse_collection(data: bytes | str) -> Collection:
+    return parse_collection_strict(_normalize_body(data, "collection"))
+
+
+def parse_offering(data: bytes | str) -> Offering:
+    return parse_offering_strict(_normalize_body(data, "offering"))
+
+
+def parse_collection_page(data: bytes | str) -> Page[Collection]:
+    return parse_collection_page_strict(_normalize_body(data, "collection-page"))
+
+
+def parse_offering_page(data: bytes | str) -> OfferingPage[Offering]:
+    return parse_offering_page_strict(_normalize_body(data, "offering-page"))
+
+
+def parse_problem_response(data: bytes | str, status: int) -> ProblemDetails:
+    return parse_problem_response_strict(_normalize_body(data, "problem"), status)
+
+
+def _normalize_body(data: bytes | str, kind: str) -> str:
+    raw = json.loads(data)
+    if not isinstance(raw, dict):
+        return data.decode() if isinstance(data, bytes) else data
+    return json.dumps(_normalize_agent_response(raw, kind), separators=(",", ":"))
 
 
 def _encode(value: object) -> bytes:

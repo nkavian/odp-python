@@ -9,6 +9,7 @@ from helpers import OFFERING, OFFERING_PAGE, SERVICE_DOCUMENT
 from offering_protocol.core import (
     OdpValidationError,
     Operation,
+    Protocol,
     ReferenceError,
     ResourceType,
     build_operation_url,
@@ -17,6 +18,7 @@ from offering_protocol.core import (
     is_local_resource_identifier,
     operation_method,
     operation_path,
+    parse_agent_service_document,
     parse_collection,
     parse_collection_page,
     parse_collection_search_request,
@@ -34,6 +36,197 @@ from offering_protocol.core import (
     resolve_resource_reference,
     validate_value,
 )
+from offering_protocol.core.validation import _normalize_agent_response
+
+
+def test_normalizes_agent_response_capabilities() -> None:
+    service = _normalize_agent_response(
+        {
+            "operations": [
+                {"authentication": "not-required", "name": "list-offerings"},
+                {"authentication": "not-required", "name": "future"},
+                {"authentication": "not-required", "name": "get-offering", "future": True},
+            ],
+            "mcp": [
+                {"type": "streamable-http", "url": "/mcp"},
+                {"type": "future", "url": "/future"},
+                {"type": "streamable-http", "url": "/future-member", "future": True},
+            ],
+            "branding": {
+                "icon": {"src": "/icon", "type": "image/future"},
+                "logo": {"src": "/logo", "type": "image/png", "future": True},
+                "future": {},
+            },
+            "protocols": {
+                "payments": [
+                    {
+                        "authentication": "not-required",
+                        "name": "mpp",
+                        "options": ["inflow", "future"],
+                    }
+                ]
+            },
+            "search_capabilities": {
+                "filters": {
+                    "inline": [
+                        {"type": "string", "operators": ["eq"]},
+                        {"type": "future", "operators": ["eq"]},
+                    ]
+                },
+                "sorts": {
+                    "inline": [
+                        {"keys": [{"direction": "ascending", "missing": "last"}]},
+                        {"keys": [{"direction": "future", "missing": "last"}]},
+                    ]
+                },
+            },
+        },
+        "service-document",
+    )
+    assert service["operations"] == [{"authentication": "not-required", "name": "list-offerings"}]
+    assert service["mcp"] == [{"type": "streamable-http", "url": "/mcp"}]
+    assert service["branding"] == {"logo": {"src": "/logo", "type": "image/png"}}
+    assert service["protocols"]["payments"][0]["options"] == ["inflow"]
+    assert len(service["search_capabilities"]["filters"]["inline"]) == 1
+    assert len(service["search_capabilities"]["sorts"]["inline"]) == 1
+
+    offering = _normalize_agent_response(
+        {
+            "images": [
+                {"src": "/image", "type": "image/png", "future": True},
+                {"src": "/future", "type": "image/future"},
+            ],
+            "schema": {"url": "/schema", "future": True},
+            "price": {"type": "future"},
+            "actions": [
+                {
+                    "authentication": "future-authentication",
+                    "http": {"href": "/unsupported", "method": "POST"},
+                    "id": "unsupported",
+                    "rel": "invoke",
+                },
+                {
+                    "authentication": "not-required",
+                    "http": {"href": "/run", "method": "POST"},
+                    "id": "run",
+                    "rel": "future",
+                },
+                {
+                    "authentication": "not-required",
+                    "http": {"href": "/future", "method": "PATCH"},
+                    "id": "future",
+                    "rel": "invoke",
+                },
+                {
+                    "authentication": "not-required",
+                    "http": {"href": "/future", "method": "POST", "future": True},
+                    "id": "future-member",
+                    "rel": "invoke",
+                },
+            ],
+        },
+        "offering",
+    )
+    assert offering == {
+        "images": [{"src": "/image", "type": "image/png"}],
+        "actions": [
+            {
+                "authentication": "not-required",
+                "http": {"href": "/run", "method": "POST"},
+                "id": "run",
+                "rel": "future",
+            }
+        ],
+    }
+
+    assert (
+        "payments"
+        not in _normalize_agent_response(
+            {
+                "protocols": {
+                    "payments": [{"authentication": "future-authentication", "name": "mpp"}]
+                }
+            },
+            "service-document",
+        )["protocols"]
+    )
+
+    assert _normalize_agent_response(
+        {"items": [{"images": [{"src": "/future", "type": "image/future"}]}]},
+        "collection-page",
+    ) == {"items": [{}]}
+    assert _normalize_agent_response(
+        {"items": [{"type": "string", "operators": ["eq"]}, {"type": "future"}]},
+        "filter-page",
+    ) == {"items": [{"type": "string", "operators": ["eq"]}]}
+    assert _normalize_agent_response(
+        {"items": [{"keys": []}, {"keys": [{"missing": "future"}]}]}, "sort-page"
+    ) == {"items": [{"keys": []}]}
+    assert _normalize_agent_response(
+        {"invalid_params": [{"in": "query"}, {"in": "future"}]}, "problem"
+    ) == {"invalid_params": [{"in": "query"}]}
+
+
+def test_normalizes_agent_response_boundary_edges() -> None:
+    assert "operations" not in _normalize_agent_response(
+        {"operations": [{"name": "future"}]}, "service-document"
+    )
+    assert "operations" not in _normalize_agent_response(
+        {"operations": [{"name": "list-offerings", "future": True}]}, "service-document"
+    )
+    assert _normalize_agent_response(
+        {
+            "protocols": {
+                "payments": [
+                    {"authentication": "not-required", "name": "mpp", "options": ["future"]}
+                ]
+            }
+        },
+        "service-document",
+    )["protocols"]["payments"][0] == {
+        "authentication": "not-required",
+        "name": "mpp",
+    }
+    assert "branding" not in _normalize_agent_response(
+        {"branding": {"icon": {"src": "/icon", "type": "image/future"}}},
+        "service-document",
+    )
+    assert "search_capabilities" not in _normalize_agent_response(
+        {
+            "search_capabilities": {
+                "filters": {"inline": [{"type": "future"}]},
+                "sorts": {"inline": [{"keys": [{"direction": "future"}]}]},
+            }
+        },
+        "collection",
+    )
+    assert (
+        _normalize_agent_response({"actions": [{"id": "future", "future": True}]}, "offering") == {}
+    )
+    assert (
+        _normalize_agent_response(
+            {"actions": [{"id": "future", "http": {"request": {"future": True}}}]},
+            "offering",
+        )
+        == {}
+    )
+    assert (
+        _normalize_agent_response(
+            {"actions": [{"id": "future", "http": {"request": {"schema": {"future": True}}}}]},
+            "offering",
+        )
+        == {}
+    )
+    assert (
+        _normalize_agent_response(
+            {"actions": [{"id": "future", "openapi": {"future": True}}]}, "offering"
+        )
+        == {}
+    )
+    assert _normalize_agent_response(
+        {"items": [None, {"type": "string", "operators": ["future"]}]}, "filter-page"
+    ) == {"items": [None]}
+    assert _normalize_agent_response({"items": [None]}, "sort-page") == {"items": [None]}
 
 
 def test_parses_normative_documents_and_preserves_extensions() -> None:
@@ -207,6 +400,36 @@ def test_parses_tap_trust_protocol() -> None:
     )
     assert document.protocols is not None
     assert document.protocols.trust[0].name.value == "tap"
+
+
+def test_agent_parser_filters_unknown_protocols_strictly() -> None:
+    data = (
+        SERVICE_DOCUMENT[:-2]
+        + ',"protocols":{"enrollment":[{"name":"future-enrollment"},{"name":"aep"}],'
+        '"payments":[{"authentication":"not-required","name":"future-payment"},'
+        '{"authentication":"not-required","name":"mpp"},'
+        '{"authentication":"not-required","name":"x402"}],'
+        '"trust":[{"name":"future-trust"},{"name":"tap"}]}}'
+    )
+    with pytest.raises(OdpValidationError):
+        parse_service_document(data)
+    document = parse_agent_service_document(data)
+    assert document.protocols is not None
+    assert [value.name for value in document.protocols.enrollment] == [Protocol.AEP]
+    assert [value.name for value in document.protocols.payments] == [Protocol.MPP, Protocol.X402]
+    assert [value.name for value in document.protocols.trust] == [Protocol.TAP]
+
+    unknown_only = SERVICE_DOCUMENT[:-2] + ',"protocols":{"trust":[{"name":"future"}]}}'
+    assert parse_agent_service_document(unknown_only).protocols is None
+
+    malformed = SERVICE_DOCUMENT[:-2] + ',"protocols":{"trust":[{"name":"tap","extra":true}]}}'
+    with pytest.raises(OdpValidationError):
+        parse_agent_service_document(malformed)
+
+    with pytest.raises(OdpValidationError):
+        parse_agent_service_document("invalid")
+    with pytest.raises(OdpValidationError):
+        parse_agent_service_document("[]")
 
 
 def test_problem_status_must_match_http_status() -> None:

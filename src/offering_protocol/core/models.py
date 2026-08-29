@@ -379,7 +379,7 @@ class Action(OdpModel):
     http: HttpActionTarget | None = None
     id: str
     openapi: OpenApiActionTarget | None = None
-    rel: ActionRelation
+    rel: ActionRelation | str
 
 
 class Offering(OdpModel):

@@ -108,6 +108,22 @@ async def test_inspects_support_before_fetching_and_caches_document() -> None:
 
 
 @pytest.mark.asyncio
+async def test_inspection_filters_unknown_protocols() -> None:
+    document = SERVICE_DOCUMENT.replace(
+        '"protocols":{"trust":[{"name":"tap"}]}',
+        '"protocols":{"payments":[{"authentication":"not-required",'
+        '"name":"future-payment"},{"authentication":"not-required","name":"mpp"}],'
+        '"trust":[{"name":"future-trust"},{"name":"tap"}]}',
+    )
+    inspection = await ServiceClient(
+        "https://demo.inflowpay.ai", transport=QueueTransport(response(document))
+    ).inspect()
+    assert inspection.document.protocols is not None
+    assert [value.name for value in inspection.document.protocols.payments] == [Protocol.MPP]
+    assert [value.name for value in inspection.document.protocols.trust] == [Protocol.TAP]
+
+
+@pytest.mark.asyncio
 async def test_lists_searches_and_continues_resources() -> None:
     searchable = SERVICE_DOCUMENT.replace(
         '"name":"list-offerings"}',

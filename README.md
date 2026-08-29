@@ -252,6 +252,10 @@ its Actions can advertise enrollment, payment, and trust protocols, but ODP does
 credentials, invoke Actions, submit payments, or implement trust protocols. Applications compose
 the appropriate protocol clients around an Action resolved through ODP.
 
+`parse_service_document` is the strict current-version Service parser. Agent inspection and
+Directory results filter unrecognized enrollment, payment, and trust descriptors while retaining
+strict validation for recognized descriptors.
+
 ## Errors and validation
 
 Each role exposes typed errors:

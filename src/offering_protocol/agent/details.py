@@ -53,7 +53,7 @@ class DiscoveredAction:
     http: DiscoveredHttpAction | None
     id: str
     openapi: DiscoveredOpenApiAction | None
-    rel: ActionRelation
+    rel: ActionRelation | str
 
 
 @dataclass(frozen=True, slots=True)
