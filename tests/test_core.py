@@ -444,6 +444,10 @@ def test_problem_status_must_match_http_status() -> None:
     assert parse_problem_response(body, 404).code == "NOT_FOUND"
     with pytest.raises(OdpValidationError):
         parse_problem_response(body, 400)
+    with pytest.raises(OdpValidationError):
+        parse_problem_response(
+            body.replace("problems/not-found", "problems/validation-failed"), 404
+        )
 
 
 def test_page_parsers_apply_nested_semantic_validation() -> None:

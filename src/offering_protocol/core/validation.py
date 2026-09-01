@@ -456,7 +456,14 @@ def parse_offering(data: bytes | str) -> Offering:
 
 
 def parse_problem_details(data: bytes | str) -> ProblemDetails:
-    return _parse(data, "problem-details.schema.json", "Problem Details", ProblemDetails)
+    value = _parse(data, "problem-details.schema.json", "Problem Details", ProblemDetails)
+    expected_type = "https://offeringprotocol.org/problems/" + value.code.lower().replace("_", "-")
+    if value.problem_type != expected_type:
+        raise OdpValidationError(
+            "Problem Details",
+            [_issue("/type", "problem-type", "must correspond to the problem code")],
+        )
+    return value
 
 
 def parse_problem_response(data: bytes | str, http_status: int) -> ProblemDetails:
