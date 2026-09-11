@@ -65,8 +65,9 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Use `search_services()` when the application wants bounded automatic pagination. Use `suggest()` to
-discover keyword completions supported by the Directory.
+Use `search_services()` when the application wants bounded automatic pagination. Search responses
+provide facets for enrollment protocols, keywords, operations, payment protocols, payment options,
+and trust protocols. Use `suggest()` to discover keyword completions supported by the Directory.
 
 ## Inspect and navigate a Service
 

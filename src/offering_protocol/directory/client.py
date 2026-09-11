@@ -178,6 +178,10 @@ def _parse_search_page(body: bytes) -> SearchPage:
         raise DirectoryError(f"invalid Directory response: {error}") from error
     if len(page.items) > 100:
         raise DirectoryError("Directory search page exceeds 100 Services")
+    if page.facets is not None and any(
+        facet.value.name.value != "tap" for facet in page.facets.trust
+    ):
+        raise DirectoryError("Directory trust facets are invalid")
     for service in page.items:
         if derive_service_origin(service.service_origin) != service.service_origin:
             raise DirectoryError("Directory Service origin is not canonical")
@@ -217,6 +221,12 @@ def _validate_search_request(request: SearchRequest) -> None:
         or any(not keyword or len(keyword) > 64 for keyword in request.filters.keywords)
     ):
         raise DirectoryError("keywords must contain at most 32 values of at most 64 characters")
+    if (
+        request.filters is not None
+        and "trust" in request.filters.model_fields_set
+        and (len(request.filters.trust) != 1 or request.filters.trust[0].name.value != "tap")
+    ):
+        raise DirectoryError("trust must contain exactly one tap descriptor")
 
 
 def _consume_response(response: HttpResponse) -> HttpResponse:
