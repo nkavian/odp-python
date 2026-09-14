@@ -98,21 +98,29 @@ class Catalog(Protocol):
 
     async def search_offerings(
         self, query: OfferingSearchRequest, request: CatalogRequest
-    ) -> OfferingPage[Offering]: ...
+    ) -> OfferingPage[Offering]:
+        del query, request
+        raise CatalogError("Offering search is not supported")
 
-    async def list_collections(self, request: CatalogRequest) -> Page[Collection]: ...
+    async def list_collections(self, request: CatalogRequest) -> Page[Collection]:
+        del request
+        raise CatalogError("Collection listing is not supported")
 
-    async def get_collection(
-        self, identifier: str, request: CatalogRequest
-    ) -> Collection | None: ...
+    async def get_collection(self, identifier: str, request: CatalogRequest) -> Collection | None:
+        del identifier, request
+        raise CatalogError("Collection retrieval is not supported")
 
     async def search_collections(
         self, query: CollectionSearchRequest, request: CatalogRequest
-    ) -> Page[Collection]: ...
+    ) -> Page[Collection]:
+        del query, request
+        raise CatalogError("Collection search is not supported")
 
     async def list_collection_offerings(
         self, collection_id: str, request: CatalogRequest
-    ) -> OfferingPage[Offering]: ...
+    ) -> OfferingPage[Offering]:
+        del collection_id, request
+        raise CatalogError("Collection Offering listing is not supported")
 
 
 class ServiceBuilder:
