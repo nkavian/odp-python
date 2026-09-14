@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Generic, TypeVar
 
 from pydantic import Field
 
@@ -13,9 +14,13 @@ from offering_protocol.core.models import (
     Operation,
     OperationDescriptor,
     PaymentOption,
+    PaymentProtocol,
     Protocol,
     ServiceProtocols,
+    TrustProtocol,
 )
+
+FacetValue = TypeVar("FacetValue")
 
 
 class Environment(StrEnum):
@@ -45,6 +50,7 @@ class ServiceFilters(OdpModel):
     keywords: list[str] = Field(default_factory=list)
     operations: list[OperationFilter] = Field(default_factory=list)
     payments: list[PaymentFilter] = Field(default_factory=list)
+    trust: list[TrustProtocol] = Field(default_factory=list)
 
 
 class SearchRequest(OdpModel):
@@ -74,17 +80,18 @@ class PaymentOptionFacetValue(OdpModel):
     option: PaymentOption
 
 
-class Facet(OdpModel):
+class Facet(OdpModel, Generic[FacetValue]):
     count: int
-    value: object
+    value: FacetValue
 
 
 class Facets(OdpModel):
-    enrollment: list[Facet] = Field(default_factory=list)
-    keywords: list[Facet] = Field(default_factory=list)
-    operations: list[Facet] = Field(default_factory=list)
-    payment_options: list[Facet] = Field(default_factory=list)
-    payments: list[Facet] = Field(default_factory=list)
+    enrollment: list[Facet[EnrollmentProtocol]] = Field(default_factory=list)
+    keywords: list[Facet[str]] = Field(default_factory=list)
+    operations: list[Facet[OperationDescriptor]] = Field(default_factory=list)
+    payment_options: list[Facet[PaymentOptionFacetValue]] = Field(default_factory=list)
+    payments: list[Facet[PaymentProtocol]] = Field(default_factory=list)
+    trust: list[Facet[TrustProtocol]] = Field(default_factory=list)
 
 
 class SearchPage(OdpModel):

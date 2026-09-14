@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from ipaddress import IPv4Address, IPv6Address
 
 import httpx
 import pytest
 
 from helpers import QueueTransport, response
+from offering_protocol.core import Protocol, TrustProtocol
 from offering_protocol.directory import (
     DirectoryClient,
     DirectoryError,
@@ -38,18 +40,33 @@ DIRECTORY_PAGE = """{
 
 @pytest.mark.asyncio
 async def test_searches_continues_and_iterates_canonical_directory() -> None:
-    first = DIRECTORY_PAGE[:-2] + ',"next":"/v1/services/search?cursor=two"}'
+    first = (
+        DIRECTORY_PAGE[:-2]
+        + ',"facets":{"trust":[{"value":{"name":"tap"},"count":1}]},'
+        + '"next":"/v1/services/search?cursor=two"}'
+    )
     transport = QueueTransport(
         response(first, content_type="application/json"),
         response(DIRECTORY_PAGE, content_type="application/json"),
     )
     client = DirectoryClient(transport=transport)
-    pages = await client.search_pages(SearchRequest(query="plants"))
+    pages = await client.search_pages(
+        SearchRequest(
+            query="plants",
+            filters=ServiceFilters(trust=[TrustProtocol(name=Protocol.TAP)]),
+        )
+    )
     assert len(pages) == 2
     assert pages[0].items[0].name == "Indica Flowers"
+    assert pages[0].facets is not None
+    assert pages[0].facets.trust[0].value == TrustProtocol(name=Protocol.TAP)
     assert transport.requests[0].url == "https://api.inflowpay.ai/v1/services/search"
     assert transport.requests[0].method == "POST"
     assert transport.requests[1].method == "GET"
+    assert json.loads(transport.requests[0].body) == {
+        "filters": {"trust": [{"name": "tap"}]},
+        "query": "plants",
+    }
 
 
 @pytest.mark.asyncio
@@ -127,6 +144,8 @@ async def test_follows_same_origin_redirect_and_changes_post_to_get() -> None:
         SearchRequest(query=" plants"),
         SearchRequest(filters=ServiceFilters(keywords=["x"] * 33)),
         SearchRequest(filters=ServiceFilters(keywords=["x" * 65])),
+        SearchRequest(filters=ServiceFilters(trust=[])),
+        SearchRequest(filters=ServiceFilters(trust=[TrustProtocol(name=Protocol.MPP)])),
     ],
 )
 async def test_rejects_invalid_searches(candidate: SearchRequest) -> None:
@@ -151,13 +170,17 @@ async def test_rejects_invalid_responses_and_continuations() -> None:
         response('{"items":[]}', content_type="text/plain"),
         response("failure", content_type="text/plain", status=500),
         response(b"x" * 524_289, content_type="application/json"),
+        response(
+            '{"items":[],"facets":{"trust":[{"value":{"name":"mpp"},"count":1}]}}',
+            content_type="application/json",
+        ),
         response('[" bad"]', content_type="application/json"),
     ]
-    for candidate in scenarios[:4]:
+    for candidate in scenarios[:5]:
         with pytest.raises(DirectoryError):
             await DirectoryClient(transport=QueueTransport(candidate)).search(SearchRequest())
     with pytest.raises(DirectoryError):
-        await DirectoryClient(transport=QueueTransport(scenarios[4])).suggest(
+        await DirectoryClient(transport=QueueTransport(scenarios[5])).suggest(
             SuggestionRequest(prefix="b")
         )
     with pytest.raises(DirectoryError):
