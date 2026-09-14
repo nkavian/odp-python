@@ -283,7 +283,7 @@ async def test_catalog_and_service_response_boundaries() -> None:
     assert (await service.handle(Request("GET", "/odp/offerings/rubber-plant"))).status == 500
     assert (await service.handle(Request("GET", "/odp/collections/plants"))).status == 500
 
-    class ApplicationCatalog:
+    class ApplicationCatalog(Catalog):
         def operations(self) -> list[Operation]:
             return [Operation.GET_OFFERING, Operation.LIST_OFFERINGS]
 
@@ -296,8 +296,24 @@ async def test_catalog_and_service_response_boundaries() -> None:
             del identifier, request
             return None
 
-    application_service = _service(cast(Catalog, ApplicationCatalog()))
+    application_service = _service(ApplicationCatalog())
     assert (await application_service.handle(Request("GET", "/odp/offerings"))).status == 500
+
+    application_catalog = ApplicationCatalog()
+    with pytest.raises(CatalogError):
+        await application_catalog.search_offerings(
+            OfferingSearchRequest(query="plant"), CatalogRequest()
+        )
+    with pytest.raises(CatalogError):
+        await application_catalog.list_collections(CatalogRequest())
+    with pytest.raises(CatalogError):
+        await application_catalog.get_collection("plants", CatalogRequest())
+    with pytest.raises(CatalogError):
+        await application_catalog.search_collections(
+            CollectionSearchRequest(query="plant"), CatalogRequest()
+        )
+    with pytest.raises(CatalogError):
+        await application_catalog.list_collection_offerings("plants", CatalogRequest())
 
     enrollment = EnrollmentProtocol(name=Protocol.AEP)
     payment = PaymentProtocol(

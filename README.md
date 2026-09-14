@@ -238,7 +238,9 @@ service = (
 Every Service integration must implement `list-offerings` and `get-offering`. `StaticCatalog` is the
 small-Service implementation: it adds Collection operations when Collections are provided and uses
 integrity-protected, stateless continuations that expire after one hour. Larger Services can
-implement the typed `Catalog` protocol over their existing indexed catalog and search infrastructure.
+subclass the typed `Catalog` protocol over their existing indexed catalog and search infrastructure.
+The protocol supplies rejecting defaults for optional operations; override an optional method and
+include its matching `Operation` only when the Service implements it.
 
 Service responses are validated against the bundled normative schemas before they are returned.
 The handler enforces fixed operation paths and methods, ODP media types, request and response byte
