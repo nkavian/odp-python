@@ -192,10 +192,11 @@ network and credential-isolation requirements. Local HTTP development is disable
 `allow_local_network=True` to `ServiceClient` only for an explicit `localhost`, `127.0.0.1`, or
 `[::1]` development Service.
 
-Attribute Schema resolution accepts JSON Schema Draft 2020-12, loads at most 16 documents through
-eight reference levels, and limits the complete schema graph to one mebibyte. Linked schema
-documents must use HTTPS. Cross-document schema composition uses `$ref`; `$dynamicRef` accepts only
-a fragment reference such as `#node`.
+Attribute Schema resolution accepts JSON Schema Draft 2020-12 and is limited to 256 KiB per
+document, 16 documents, eight reference levels, and one MiB for the complete graph. OpenAPI
+documents are limited to one MiB. These are fixed SDK safety ceilings. Linked schema documents must
+use HTTPS. Cross-document schema composition uses `$ref`; `$dynamicRef` accepts only a fragment
+reference such as `#node`.
 
 ## Publish a Service
 
