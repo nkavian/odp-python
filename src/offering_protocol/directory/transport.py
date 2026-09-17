@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import socket
 from dataclasses import dataclass, field
-from ipaddress import IPv4Address, IPv6Address, ip_address
+from ipaddress import ip_address
 from typing import Protocol
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
+
+from offering_protocol.directory.addresses import IPAddress, is_public
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,9 +95,6 @@ class HttpxTransport:
         self._clients.clear()
 
 
-IPAddress = IPv4Address | IPv6Address
-
-
 async def _pinned_target(url: str, allow_local_network: bool) -> tuple[str, str, str]:
     parsed = urlsplit(url)
     if parsed.hostname is None or parsed.username is not None or parsed.password is not None:
@@ -113,7 +112,7 @@ async def _pinned_target(url: str, allow_local_network: bool) -> tuple[str, str,
     if local_hostname and allow_local_network:
         if any(not address.is_loopback for address in addresses):
             raise ValueError("ODP local-development host resolved outside the loopback network")
-    elif any(not address.is_global for address in addresses):
+    elif any(not is_public(address) for address in addresses):
         raise ValueError("ODP request host resolved to a non-public address")
     address = addresses[0]
     pinned_host = f"[{address}]" if address.version == 6 else str(address)

@@ -27,7 +27,9 @@ from offering_protocol.core.models import (
     OfferingSearchRequest,
     Operation,
     Page,
+    PriceType,
     ProblemDetails,
+    RefinementGroup,
     ResourceIdentity,
     ServiceDocument,
     SortDefinition,
@@ -440,6 +442,23 @@ def _filter_agent_protocol_category(
 
 
 def parse_collection(data: bytes | str) -> Collection:
+    value = _read_collection(data)
+    _raise_refinement("Collection", _collection_issues(value))
+    return value
+
+
+def parse_agent_collection(data: bytes | str) -> Collection:
+    """Reads a Collection an Agent received.
+
+    ROLE-03: discovery metadata an Agent can still use is not withheld over a defect it can work
+    around, so the invariants `_collection_issues` states -- which describe a hierarchy the Agent
+    simply does not walk -- do not refuse the document here. A Service, which MUST NOT publish one,
+    goes through `parse_collection`.
+    """
+    return _read_collection(_agent_body(data, "collection"))
+
+
+def _read_collection(data: bytes | str) -> Collection:
     value = _parse(data, "collection.schema.json", "Collection", Collection)
     _validate_representation(
         value.language, value.localizations, [image.src for image in value.images]
@@ -447,12 +466,61 @@ def parse_collection(data: bytes | str) -> Collection:
     return value
 
 
+def _collection_issues(value: Collection) -> list[ValidationIssue]:
+    """The Collection rules a JSON Schema cannot state: they compare one member against another."""
+    # COL-20: a Collection naming itself as a parent is a one-node cycle, so anything walking the
+    # hierarchy upwards from it would never reach a root.
+    if value.id in value.parent_ids:
+        return [_issue("/parent_ids", "self-parent", "must not name the Collection itself")]
+    return []
+
+
 def parse_offering(data: bytes | str) -> Offering:
+    value = _read_offering(data)
+    _raise_refinement("Offering", _offering_issues(value))
+    return value
+
+
+def parse_agent_offering(data: bytes | str) -> Offering:
+    """Reads an Offering an Agent received.
+
+    ROLE-03: a defect an Agent can describe to its caller is a note about that Offering rather than
+    a reason to discard it, so the invariants `_offering_issues` states are left for the Agent to
+    report against the Actions or price they concern. A Service, which MUST NOT publish one, goes
+    through `parse_offering`.
+    """
+    return _read_offering(_agent_body(data, "offering"))
+
+
+def _read_offering(data: bytes | str) -> Offering:
     value = _parse(data, "offering.schema.json", "Offering", Offering)
     _validate_representation(
         value.language, value.localizations, [image.src for image in value.images]
     )
     return value
+
+
+def _offering_issues(value: Offering) -> list[ValidationIssue]:
+    """The Offering rules a JSON Schema cannot state: they compare one member against another."""
+    issues: list[ValidationIssue] = []
+    # OFR-57: an Action identifier is unique within its Offering, so a repeat leaves a caller
+    # unable to say which Action it meant.
+    identifiers = [action.id for action in value.actions]
+    if len(identifiers) != len(set(identifiers)):
+        issues.append(
+            _issue("/actions", "unique-action-id", "must contain unique Action identifiers")
+        )
+    # OFR-49: a range whose minimum is above its maximum describes no price at all.
+    price = value.price
+    if (
+        price is not None
+        and price.price_type is PriceType.RANGE
+        and _compare_decimals(price.minimum, price.maximum) > 0
+    ):
+        issues.append(
+            _issue("/price/minimum", "price-range", "must be less than or equal to maximum")
+        )
+    return issues
 
 
 def parse_problem_details(data: bytes | str) -> ProblemDetails:
@@ -487,7 +555,37 @@ def parse_collection_page(data: bytes | str) -> Page[Collection]:
     return value
 
 
+def parse_agent_collection_page(data: bytes | str) -> Page[Collection]:
+    """Reads a page of Collections an Agent received, item by item, tolerantly."""
+    value = _parse(
+        _agent_body(data, "collection-page"),
+        "page-envelope.schema.json",
+        "Collection page",
+        Page[Collection],
+    )
+    for item in value.items:
+        _read_collection(_embedded_json(item, value.odp_version))
+    return value
+
+
 def parse_offering_page(data: bytes | str) -> OfferingPage[Offering]:
+    value = _read_offering_page(data)
+    _raise_refinement("Offering page", _refinement_issues(value.refinements))
+    for item in value.items:
+        _raise_refinement("Offering", _offering_issues(item))
+    return value
+
+
+def parse_agent_offering_page(data: bytes | str) -> OfferingPage[Offering]:
+    """Reads a page of Offerings an Agent received.
+
+    A Refinement Group the Agent cannot use is no reason to discard the Offering results beside it,
+    so the invariants `_refinement_issues` states do not refuse the page here.
+    """
+    return _read_offering_page(_agent_body(data, "offering-page"))
+
+
+def _read_offering_page(data: bytes | str) -> OfferingPage[Offering]:
     value = _parse(
         data,
         "offering-search-response.schema.json",
@@ -495,8 +593,38 @@ def parse_offering_page(data: bytes | str) -> OfferingPage[Offering]:
         OfferingPage[Offering],
     )
     for item in value.items:
-        parse_offering(_embedded_json(item, value.odp_version))
+        _read_offering(_embedded_json(item, value.odp_version))
     return value
+
+
+def _refinement_issues(groups: list[RefinementGroup]) -> list[ValidationIssue]:
+    """The Refinement rules a JSON Schema cannot state: they compare one member against another."""
+    issues: list[ValidationIssue] = []
+    # FLT-30: `filter_id` is unique among the returned groups, so a repeat leaves an Agent unable
+    # to say which group belongs to that Filter Definition.
+    identifiers = [group.filter_id for group in groups]
+    if len(identifiers) != len(set(identifiers)):
+        issues.append(
+            _issue(
+                "/refinements",
+                "unique-filter-id",
+                "must contain unique Refinement Group identifiers",
+            )
+        )
+    # FLT-32: bucket values are unique within a group. The schema's `uniqueItems` compares whole
+    # buckets, so it passes two buckets that name one value with differing counts -- exactly the
+    # case that leaves an Agent with two counts for the same candidate and no way to choose.
+    for index, group in enumerate(groups):
+        keys = [_bucket_key(bucket.value) for bucket in group.values]
+        if len(keys) != len(set(keys)):
+            issues.append(
+                _issue(
+                    f"/refinements/{index}/values",
+                    "unique-bucket-value",
+                    "must contain unique Refinement Bucket values",
+                )
+            )
+    return issues
 
 
 def parse_collection_search_request(data: bytes | str) -> CollectionSearchRequest:
@@ -536,14 +664,30 @@ def parse_filter_definition(data: bytes | str) -> FilterDefinition:
                 "contains an operator incompatible with the Filter type",
             )
         )
-    if value.filter_type is FilterType.BOOLEAN and value.unit is not None:
-        issues.append(_issue("/unit", "unit-type", "must not appear on a boolean Filter"))
+    # FLT-10: only a numeric Filter carries a unit. A unit on a string, date, date-time or boolean
+    # Filter describes a dimension its values do not have, so a caller reading it would convert or
+    # label values that were never quantities.
+    if value.unit is not None and value.filter_type not in {
+        FilterType.DECIMAL,
+        FilterType.INTEGER,
+        FilterType.NUMBER,
+    }:
+        issues.append(_issue("/unit", "unit-type", "must not appear on a non-numeric Filter"))
     _raise_refinement("Filter Definition", issues)
     return value
 
 
 def parse_sort_definition(data: bytes | str) -> SortDefinition:
-    return _parse(data, "sort-definition.schema.json", "Sort Definition", SortDefinition)
+    value = _parse(data, "sort-definition.schema.json", "Sort Definition", SortDefinition)
+    # FLT-41: every `filter_id` in a Sort Definition is distinct. Ordering by one Filter twice
+    # cannot change the order, so a repeat describes a recipe that does not mean what it says.
+    identifiers = [key.filter_id for key in value.keys]
+    if len(identifiers) != len(set(identifiers)):
+        _raise_refinement(
+            "Sort Definition",
+            [_issue("/keys", "unique-filter-id", "must order by each Filter at most once")],
+        )
+    return value
 
 
 def parse_filter_definition_page(data: bytes | str) -> Page[FilterDefinition]:
@@ -743,6 +887,65 @@ def _is_language_tag(value: str) -> bool:
                 return False
             variants.add(subtag)
     return not in_extension or len(subtags[-1]) > 1
+
+
+_DECIMAL = re.compile(r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$")
+
+
+def _compare_decimals(left: str, right: str) -> int:
+    """Orders two ODP monetary values, which are decimal strings rather than JSON numbers (OFR-48).
+
+    Decimal equality and ordering are numeric rather than lexical, so `1.0` equals `1.00` and
+    `9.00` sits below `10.00`. The comparison is done digit by digit: parsing to a float would lose
+    the precision the decimal form exists to keep.
+    """
+    left_whole, left_fraction = _split_decimal(left)
+    right_whole, right_fraction = _split_decimal(right)
+    for ours, theirs in (
+        (len(left_whole), len(right_whole)),
+        (left_whole, right_whole),
+        (left_fraction, right_fraction),
+    ):
+        if ours != theirs:
+            return 1 if ours > theirs else -1  # type: ignore[operator]
+    return 0
+
+
+def _split_decimal(value: str) -> tuple[str, str]:
+    whole, _, fraction = value.partition(".")
+    return whole.lstrip("0"), fraction.rstrip("0")
+
+
+def _bucket_key(value: object) -> str:
+    """Compares two bucket values the way the referenced Filter Definition would.
+
+    A response does not carry its Filter Definitions, so the type behind a JSON string -- `string`,
+    `decimal`, `date` or `date-time` -- is not known here. Every one of those compares two strings
+    exactly except `decimal`, whose equality is numeric, so a string that can only be a decimal is
+    reduced to one spelling per value. JSON numbers compare numerically.
+    """
+    if isinstance(value, bool):
+        return f"b{value}"
+    if isinstance(value, int | float):
+        return f"n{float(value)}"
+    if isinstance(value, str):
+        if _DECIMAL.match(value):
+            whole, fraction = _split_decimal(value.removeprefix("-"))
+            sign = "-" if value.startswith("-") and (whole or fraction) else ""
+            return f"d{sign}{whole}.{fraction}"
+        return f"s{value}"
+    return f"o{json.dumps(value, separators=(',', ':'), sort_keys=True)}"
+
+
+def _agent_body(data: bytes | str, kind: str) -> str:
+    """Applies the Agent's forward-compatibility filtering, leaving a body it can then validate."""
+    try:
+        raw = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return data.decode(errors="replace") if isinstance(data, bytes) else data
+    if not isinstance(raw, dict):
+        return json.dumps(raw, separators=(",", ":"))
+    return json.dumps(_normalize_agent_response(raw, kind), separators=(",", ":"))
 
 
 def _issue(path: str, keyword: str, message: str) -> ValidationIssue:

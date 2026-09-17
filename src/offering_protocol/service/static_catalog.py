@@ -205,8 +205,12 @@ def _represent_collection(value: Collection, request: CatalogRequest, embedded: 
 def _encode_cursor(
     request: CatalogRequest, limit: int, offset: int, continuation_key: bytes
 ) -> str:
+    # The cursor carries everything that decided what this page contained, so a continuation
+    # cannot quietly change variant part-way through a sequence -- including the language, because
+    # a page served in French is a different page from the same offsets served in English.
     value = {
         "expires": int(time.time()) + _CONTINUATION_LIFETIME_SECONDS,
+        "language": request.language,
         "limit": limit,
         "offset": offset,
         "path": request.path,
@@ -243,6 +247,7 @@ def _decode_cursor(request: CatalogRequest, limit: int, continuation_key: bytes)
         if (
             not isinstance(value, dict)
             or value.get("expires", 0) < int(time.time())
+            or value.get("language") != request.language
             or value.get("limit") != limit
             or value.get("path") != request.path
             or value.get("representation") != request.representation.value

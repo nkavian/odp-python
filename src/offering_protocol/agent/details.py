@@ -17,6 +17,9 @@ from offering_protocol.core import (
 )
 
 _MAXIMUM_OPENAPI_BYTES = 1_048_576
+# OFR-73: an OpenAPI Action document nests deeper than an ODP document, so it has its own
+# allowance rather than the 16 ERR-21 gives every other retrieved document.
+_MAXIMUM_OPENAPI_DEPTH = 32
 
 
 class OfferingIssueScope(StrEnum):
@@ -120,6 +123,7 @@ async def resolve_action(client: ServiceClient, offering_id: str, action_id: str
         "application/vnd.oai.openapi+json;version=3.1, application/json;q=0.9",
         {"application/vnd.oai.openapi+json", "application/json"},
         _MAXIMUM_OPENAPI_BYTES,
+        _MAXIMUM_OPENAPI_DEPTH,
     )
     version = document.get("openapi")
     if not isinstance(version, str) or not version.startswith("3.1."):

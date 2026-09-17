@@ -291,7 +291,7 @@ async def test_builds_agent_friendly_offering_details_without_invoking_action() 
 DIRECTORY_PAGE = """{
   "items":[{
     "description":"Plants","indexed_at":"2026-08-25T00:00:00Z","language":"en",
-    "localizations":["en"],"name":"One","operations":[],
+    "localizations":["en"],"name":"One","operations":[{"authentication":"not-required","name":"get-offering"},{"authentication":"not-required","name":"list-offerings"}],
     "service_origin":"https://one.example"
   }]
 }"""
@@ -595,7 +595,7 @@ async def test_capability_limits_duplicates_and_pagination_edges(
         CapabilityScope.SERVICE,
         SearchCapabilities(filters=FilterCapabilitySource(inline=[definition])),
     )
-    assert "exceed 1024" in result.issues[-1].message
+    assert "Effective filters exceed their limit" in result.issues[-1].message
 
     sort = SortDefinition(
         description="Price",
@@ -620,8 +620,11 @@ async def test_capability_limits_duplicates_and_pagination_edges(
         CapabilityScope.COLLECTION,
         SearchCapabilities(sorts=SortCapabilitySource(inline=[sort, sort])),
     )
-    assert not target and not scopes
-    assert "Duplicate sorts" in result.issues[-1].message
+    # FLT-55: `[sort, sort]` repeats an identifier within one source, so that source is
+    # discarded whole and the sort merged from the earlier source is left exactly as it was.
+    assert target == {"price": sort}
+    assert scopes == {"price": CapabilityScope.SERVICE}
+    assert "within one source" in result.issues[-1].message
 
     with pytest.raises(AgentError):
         _resolve_reference("data:text/plain,x", client.service_origin)
@@ -834,7 +837,7 @@ async def test_remaining_capability_and_cache_branches(monkeypatch: pytest.Monke
         CapabilityScope.SERVICE,
         SearchCapabilities(sorts=SortCapabilitySource(inline=[sort])),
     )
-    assert "exceed 128" in result.issues[-1].message
+    assert "Effective sorts exceed their limit" in result.issues[-1].message
 
     monkeypatch.setattr("offering_protocol.agent.capabilities._MAXIMUM_CAPABILITY_PAGES", 1)
     filter_limit = ServiceClient(

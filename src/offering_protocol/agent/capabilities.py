@@ -2,20 +2,24 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from urllib.parse import urljoin, urlsplit
+from typing import Any, cast
 
 from offering_protocol.agent.client import AgentError, ServiceClient
 from offering_protocol.core import (
     Collection,
+    FilterCapabilitySource,
     FilterDefinition,
     Operation,
+    ReferenceError,
     SearchCapabilities,
+    SortCapabilitySource,
     SortDefinition,
     parse_filter_definition_page,
     parse_sort_definition_page,
+    resolve_continuation,
 )
 
 _MAXIMUM_CAPABILITY_PAGES = 16
@@ -122,32 +126,17 @@ async def _add_filters(
     scope: CapabilityScope,
     capabilities: SearchCapabilities,
 ) -> None:
-    if capabilities.filters is None:
-        return
-    try:
-        values = (
-            await _load_filters(client, capabilities.filters.linked.href)
-            if capabilities.filters.linked is not None
-            else capabilities.filters.inline
-        )
-    except AgentError as error:
-        result.issues.append(CapabilityIssue(CapabilityKind.FILTERS, str(error), scope))
-        return
-    duplicates = _duplicates((item.id for item in values), result.filters)
-    for identifier in duplicates:
-        result.filters.pop(identifier, None)
-    accepted = [item for item in values if item.id not in duplicates]
-    if len(result.filters) + len(accepted) > _MAXIMUM_FILTERS:
-        result.issues.append(
-            CapabilityIssue(
-                CapabilityKind.FILTERS,
-                "Effective filters exceed 1024 entries",
-                scope,
-            )
-        )
-        return
-    result.filters.update((item.id, item) for item in accepted)
-    _report_duplicates(duplicates, CapabilityKind.FILTERS, scope, result.issues)
+    await _add_source(
+        client,
+        result,
+        CapabilityKind.FILTERS,
+        scope,
+        capabilities.filters,
+        result.filters,
+        _MAXIMUM_FILTERS,
+        _load_filters,
+        None,
+    )
 
 
 async def _add_sorts(
@@ -158,34 +147,109 @@ async def _add_sorts(
     scope: CapabilityScope,
     capabilities: SearchCapabilities,
 ) -> None:
-    if capabilities.sorts is None:
+    await _add_source(
+        client,
+        result,
+        CapabilityKind.SORTS,
+        scope,
+        capabilities.sorts,
+        target,
+        _MAXIMUM_SORTS,
+        _load_sorts,
+        scopes,
+    )
+
+
+async def _add_source(
+    client: ServiceClient,
+    result: SearchCapabilityCatalog,
+    kind: CapabilityKind,
+    scope: CapabilityScope,
+    source: FilterCapabilitySource | SortCapabilitySource | None,
+    target: dict[str, Any],
+    maximum: int,
+    load: Callable[[ServiceClient, str, int], Awaitable[list[Any]]],
+    scopes: dict[str, CapabilityScope] | None,
+) -> None:
+    """Merges one capability source into the effective catalog, or reports why it cannot be.
+
+    FLT-55 makes a source atomic: every page is retrieved and the source's own rules are enforced
+    before any of its definitions is exposed. So the work below decides everything first and writes
+    to `target` only once the source has been accepted -- an invalid or oversized source leaves the
+    sources merged before it exactly as they were.
+    """
+    if source is None:
         return
     try:
-        values = (
-            await _load_sorts(client, capabilities.sorts.linked.href)
-            if capabilities.sorts.linked is not None
-            else capabilities.sorts.inline
+        values: Sequence[Any] = (
+            await load(client, source.linked.href, maximum - len(target))
+            if source.linked is not None
+            else list(source.inline)
         )
+        # FLT-55: a source enforces its own uniqueness, so an identifier this source publishes
+        # twice makes the whole source unusable -- there is no basis for choosing between them.
+        identifiers: set[str] = set()
+        for value in values:
+            if value.id in identifiers:
+                raise AgentError(f"Duplicate {kind.value} identifier {value.id} within one source")
+            identifiers.add(value.id)
+        # An identifier two effective sources both publish is quarantined instead: neither copy
+        # wins, and nothing else about either source is affected.
+        shared = sorted(identifier for identifier in identifiers if identifier in target)
+        accepted = [value for value in values if value.id not in shared]
+        # FLT-62: the bound is checked before anything is written, so a source that overflows the
+        # effective catalog cannot take the earlier valid sources down with it.
+        if len(target) - len(shared) + len(accepted) > maximum:
+            raise AgentError(f"Effective {kind.value} exceed their limit")
     except AgentError as error:
-        result.issues.append(CapabilityIssue(CapabilityKind.SORTS, str(error), scope))
+        result.issues.append(CapabilityIssue(kind, str(error), scope))
         return
-    duplicates = _duplicates((item.id for item in values), target)
-    for identifier in duplicates:
+    for identifier in shared:
         target.pop(identifier, None)
-        scopes.pop(identifier, None)
-    accepted = [item for item in values if item.id not in duplicates]
-    if len(target) + len(accepted) > _MAXIMUM_SORTS:
+        if scopes is not None:
+            scopes.pop(identifier, None)
+    for value in accepted:
+        target[value.id] = value
+        if scopes is not None:
+            scopes[value.id] = scope
+    if shared:
         result.issues.append(
-            CapabilityIssue(CapabilityKind.SORTS, "Effective sorts exceed 128 entries", scope)
+            CapabilityIssue(kind, f"Duplicate {kind.value}: {', '.join(shared)}", scope)
         )
-        return
-    target.update((item.id, item) for item in accepted)
-    scopes.update((item.id, scope) for item in accepted)
-    _report_duplicates(duplicates, CapabilityKind.SORTS, scope, result.issues)
 
 
-async def _load_filters(client: ServiceClient, reference: str) -> list[FilterDefinition]:
-    values: list[FilterDefinition] = []
+async def _load_filters(
+    client: ServiceClient, reference: str, budget: int = _MAXIMUM_FILTERS
+) -> list[FilterDefinition]:
+    values = await _load_definitions(
+        client, reference, budget, parse_filter_definition_page, CapabilityKind.FILTERS
+    )
+    return cast("list[FilterDefinition]", values)
+
+
+async def _load_sorts(
+    client: ServiceClient, reference: str, budget: int = _MAXIMUM_SORTS
+) -> list[SortDefinition]:
+    values = await _load_definitions(
+        client, reference, budget, parse_sort_definition_page, CapabilityKind.SORTS
+    )
+    return cast("list[SortDefinition]", values)
+
+
+async def _load_definitions(
+    client: ServiceClient,
+    reference: str,
+    budget: int,
+    parse: Callable[[bytes | str], Any],
+    kind: CapabilityKind,
+) -> list[Any]:
+    """Retrieves a complete linked source, one page at a time.
+
+    The budget is what the effective catalog has left. FLT-58 asks the Agent to stop retrieving a
+    source once it cannot fit, so the budget is checked as each page arrives rather than after the
+    whole source has been buffered: a source that can never fit costs one page, not sixteen.
+    """
+    values: list[Any] = []
     next_reference = reference
     visited: set[str] = set()
     for _ in range(_MAXIMUM_CAPABILITY_PAGES):
@@ -195,33 +259,11 @@ async def _load_filters(client: ServiceClient, reference: str) -> list[FilterDef
         if target in visited:
             raise AgentError("ODP capability pagination loop detected")
         visited.add(target)
-        body = await client._linked_odp(
-            target, client._cache_fallbacks.collection, parse_filter_definition_page
-        )
-        page = parse_filter_definition_page(body)
+        body = await client._linked_odp(target, client._cache_fallbacks.collection, parse)
+        page = parse(body)
         values.extend(page.items)
-        next_reference = page.next
-    if next_reference:
-        raise AgentError("ODP capability source exceeded 16 pages")
-    return values
-
-
-async def _load_sorts(client: ServiceClient, reference: str) -> list[SortDefinition]:
-    values: list[SortDefinition] = []
-    next_reference = reference
-    visited: set[str] = set()
-    for _ in range(_MAXIMUM_CAPABILITY_PAGES):
-        if not next_reference:
-            return values
-        target = _resolve_reference(next_reference, client.service_origin)
-        if target in visited:
-            raise AgentError("ODP capability pagination loop detected")
-        visited.add(target)
-        body = await client._linked_odp(
-            target, client._cache_fallbacks.collection, parse_sort_definition_page
-        )
-        page = parse_sort_definition_page(body)
-        values.extend(page.items)
+        if len(values) > budget:
+            raise AgentError(f"Effective {kind.value} exceed their limit")
         next_reference = page.next
     if next_reference:
         raise AgentError("ODP capability source exceeded 16 pages")
@@ -229,34 +271,14 @@ async def _load_sorts(client: ServiceClient, reference: str) -> list[SortDefinit
 
 
 def _resolve_reference(reference: str, origin: str) -> str:
-    target = urljoin(f"{origin}/", reference)
-    parsed = urlsplit(target)
-    if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
-        raise AgentError("ODP capability reference must use HTTP or HTTPS")
-    return target
+    """Resolves a linked capability reference, which stays on the Service that advertised it.
 
-
-def _duplicates(values: Iterable[str], existing: Mapping[str, object]) -> set[str]:
-    seen: set[str] = set()
-    duplicates: set[str] = set()
-    for value in values:
-        if value in seen or value in existing:
-            duplicates.add(value)
-        seen.add(value)
-    return duplicates
-
-
-def _report_duplicates(
-    duplicates: set[str],
-    kind: CapabilityKind,
-    scope: CapabilityScope,
-    issues: list[CapabilityIssue],
-) -> None:
-    if duplicates:
-        issues.append(
-            CapabilityIssue(
-                kind,
-                f"Duplicate {kind.value}: {', '.join(sorted(duplicates))}",
-                scope,
-            )
-        )
+    FLT-52 makes `href` a same-origin Resource Reference and FLT-53 puts every `next` under the
+    common continuation contract, so both are resolved the way a page continuation is. Without
+    that, a Service Document written by somebody else could send this Agent's ODP requests to a
+    host of its choosing.
+    """
+    try:
+        return resolve_continuation(reference, origin)
+    except ReferenceError as error:
+        raise AgentError(str(error)) from error

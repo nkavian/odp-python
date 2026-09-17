@@ -278,7 +278,8 @@ network and credential-isolation requirements. Local HTTP development is disable
 
 Attribute Schema resolution accepts JSON Schema Draft 2020-12 and is limited to 256 KiB per
 document, 16 documents, eight reference levels, and one MiB for the complete graph. OpenAPI
-documents are limited to one MiB. These are fixed SDK safety ceilings. Linked schema documents must
+documents are limited to one MiB and 32 levels of JSON nesting. Every other ODP response is limited
+to 16 levels of nesting, and the Service Document to eight. These are fixed SDK safety ceilings. Linked schema documents must
 use HTTPS. Cross-document schema composition uses `$ref`; `$dynamicRef` accepts only a fragment
 reference such as `#node`.
 

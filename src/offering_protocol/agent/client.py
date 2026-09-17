@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, cast
@@ -30,21 +30,21 @@ from offering_protocol.core import (
     resolve_continuation,
 )
 from offering_protocol.core import (
-    parse_collection as parse_collection_strict,
+    parse_agent_collection as parse_agent_collection_strict,
 )
 from offering_protocol.core import (
-    parse_collection_page as parse_collection_page_strict,
+    parse_agent_collection_page as parse_agent_collection_page_strict,
 )
 from offering_protocol.core import (
-    parse_offering as parse_offering_strict,
+    parse_agent_offering as parse_agent_offering_strict,
 )
 from offering_protocol.core import (
-    parse_offering_page as parse_offering_page_strict,
+    parse_agent_offering_page as parse_agent_offering_page_strict,
 )
 from offering_protocol.core import (
     parse_problem_response as parse_problem_response_strict,
 )
-from offering_protocol.core.validation import _normalize_agent_response
+from offering_protocol.core.validation import _agent_body
 from offering_protocol.directory.transport import (
     HttpRequest,
     HttpResponse,
@@ -60,7 +60,11 @@ if TYPE_CHECKING:
 MEDIA_TYPE = "application/odp+json"
 _MAXIMUM_DOCUMENT_BYTES = 65_536
 _MAXIMUM_RESOURCE_BYTES = 524_288
+_MAXIMUM_PROBLEM_BYTES = 16_384
 _MAXIMUM_REDIRECTS = 5
+# ERR-21: a Service Document nests no deeper than 8 containers, every other ODP document 16.
+_MAXIMUM_DOCUMENT_DEPTH = 8
+_MAXIMUM_DEPTH = 16
 
 
 class Freshness(StrEnum):
@@ -149,6 +153,7 @@ class ServiceClient:
             _MAXIMUM_DOCUMENT_BYTES,
             self._cache_fallbacks.service_document,
             parse_agent_service_document,
+            _MAXIMUM_DOCUMENT_DEPTH,
         )
         return Inspection(
             document=parse_agent_service_document(response.body),
@@ -384,6 +389,7 @@ class ServiceClient:
         maximum_bytes: int,
         fallback: timedelta,
         parser: object,
+        maximum_depth: int = _MAXIMUM_DEPTH,
     ) -> _FetchedResponse:
         key = self._cache_key(method, target, body)
         cached = self._cache.get(key)
@@ -415,7 +421,7 @@ class ServiceClient:
             record = replace(cached, expires=expires, final_url=final_url, stored=now)
             self._cache.set(key, record)
             return _FetchedResponse(record.body, record.final_url, Freshness.REVALIDATED)
-        response = _consume(response, maximum_bytes)
+        response = _consume(response, maximum_bytes, maximum_depth)
         _invoke_parser(parser, response.body)
         if _cacheable(method, response.headers, fallback):
             self._cache.set(
@@ -476,6 +482,7 @@ class ServiceClient:
         accept: str,
         media_types: set[str],
         maximum_bytes: int,
+        maximum_depth: int | None = None,
     ) -> dict[str, object]:
         current = target
         if not _is_https_url(current):
@@ -538,6 +545,8 @@ class ServiceClient:
             content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
             if content_type not in media_types:
                 raise AgentError("ODP supporting document has an unsupported media type")
+            if maximum_depth is not None:
+                _require_depth(response.body, maximum_depth, "ODP supporting document")
             value = _decode_json_object(response.body)
             if _cacheable("GET", response.headers, timedelta()):
                 self._cache.set(
@@ -584,30 +593,23 @@ def _operation_parser(operation: Operation) -> object:
 
 
 def parse_collection(data: bytes | str) -> Collection:
-    return parse_collection_strict(_normalize_body(data, "collection"))
+    return parse_agent_collection_strict(data)
 
 
 def parse_offering(data: bytes | str) -> Offering:
-    return parse_offering_strict(_normalize_body(data, "offering"))
+    return parse_agent_offering_strict(data)
 
 
 def parse_collection_page(data: bytes | str) -> Page[Collection]:
-    return parse_collection_page_strict(_normalize_body(data, "collection-page"))
+    return parse_agent_collection_page_strict(data)
 
 
 def parse_offering_page(data: bytes | str) -> OfferingPage[Offering]:
-    return parse_offering_page_strict(_normalize_body(data, "offering-page"))
+    return parse_agent_offering_page_strict(data)
 
 
 def parse_problem_response(data: bytes | str, status: int) -> ProblemDetails:
-    return parse_problem_response_strict(_normalize_body(data, "problem"), status)
-
-
-def _normalize_body(data: bytes | str, kind: str) -> str:
-    raw = json.loads(data)
-    if not isinstance(raw, dict):
-        return data.decode() if isinstance(data, bytes) else data
-    return json.dumps(_normalize_agent_response(raw, kind), separators=(",", ":"))
+    return parse_problem_response_strict(_agent_body(data, "problem"), status)
 
 
 def _encode(value: object) -> bytes:
@@ -634,25 +636,76 @@ def _decode_json_object(data: bytes) -> dict[str, object]:
         value = json.loads(data)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise AgentError(f"ODP supporting document is invalid JSON: {error}") from error
+    except RecursionError as error:
+        raise AgentError("ODP supporting document is nested too deeply") from error
     if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
         raise AgentError("ODP supporting document must be a JSON object")
     return cast(dict[str, object], value)
 
 
-def _consume(response: HttpResponse, maximum_bytes: int) -> HttpResponse:
+def _consume(response: HttpResponse, maximum_bytes: int, maximum_depth: int) -> HttpResponse:
+    if not 200 <= response.status < 300:
+        raise ServiceRequestError(response.status, _problem_message(response), response.headers)
     if len(response.body) > maximum_bytes:
         raise AgentError("ODP response exceeds its byte limit")
-    if not 200 <= response.status < 300:
-        try:
-            problem = parse_problem_response(response.body, response.status)
-            message = problem.detail or problem.title
-        except ValueError:
-            message = response.body.decode(errors="replace")
-        raise ServiceRequestError(response.status, message, response.headers)
     content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     if content_type != MEDIA_TYPE:
         raise AgentError(f"ODP response must use {MEDIA_TYPE}")
+    _require_depth(response.body, maximum_depth, "ODP response")
     return response
+
+
+def _problem_message(response: HttpResponse) -> str:
+    """Describes a refused request, reading the body only within the Problem Details limit.
+
+    ERR-21 budgets a Problem Details response at 16,384 bytes, so a larger body is not a Problem
+    Details document this Agent will read. The HTTP status still describes the failure, which is
+    why an oversized error body reports the status rather than a byte-limit error.
+    """
+    if len(response.body) > _MAXIMUM_PROBLEM_BYTES:
+        return f"ODP request failed with HTTP {response.status}"
+    try:
+        problem = parse_problem_response(response.body, response.status)
+    except ValueError:
+        return response.body.decode(errors="replace")
+    return problem.detail or problem.title
+
+
+def _require_depth(body: bytes, maximum: int, subject: str) -> None:
+    """Rejects a document nested deeper than ERR-21 allows.
+
+    A malformed body is left alone here so the document parser reports it in its own words. Depth
+    is counted the way ERR-18 measures it, from the top-level value, and the walk keeps its own
+    stack: a recursive one would exhaust the interpreter on exactly the documents this limit exists
+    to refuse.
+    """
+    try:
+        value = json.loads(body)
+    except (RecursionError, UnicodeDecodeError, ValueError):
+        return
+    if _nesting_depth(value) > maximum:
+        raise AgentError(f"{subject} exceeds its nesting-depth limit")
+
+
+def _nesting_depth(value: object) -> int:
+    """Counts container nesting from the top-level value.
+
+    `{}` and `{"a": 1}` are both depth 1 and `{"a": {"b": 1}}` is depth 2: a scalar is a value a
+    container holds, not a level of its own.
+    """
+    maximum = 0
+    pending: list[tuple[int, object]] = [(1, value)]
+    while pending:
+        depth, current = pending.pop()
+        if isinstance(current, dict):
+            children: list[object] = list(current.values())
+        elif isinstance(current, list):
+            children = list(current)
+        else:
+            continue
+        maximum = max(maximum, depth)
+        pending.extend((depth + 1, child) for child in children)
+    return maximum
 
 
 def _traversal_bounds(options: TraversalOptions) -> tuple[int, int]:
@@ -699,8 +752,13 @@ def _expiration(headers: dict[str, str], fallback: timedelta, now: datetime) -> 
     except (KeyError, ValueError):
         pass
     if "expires" in headers:
+        # RFC 9111 5.3: an `Expires` a cache cannot read -- "0" above all -- names a time in the
+        # past, so an unreadable one expires the entry instead of granting it the fallback
+        # lifetime. A date written with the "-0000" zone parses to a naive value, which cannot be
+        # compared with the aware clock this cache keeps, so it is read as the UTC it means.
         try:
-            return parsedate_to_datetime(headers["expires"])
+            expires = parsedate_to_datetime(headers["expires"])
         except (TypeError, ValueError):
-            pass
+            return now
+        return expires if expires.tzinfo is not None else expires.replace(tzinfo=UTC)
     return now + fallback
