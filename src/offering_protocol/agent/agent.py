@@ -79,7 +79,7 @@ class Agent:
         )
         concurrency = _bounded(request.concurrency, 4, 16, "concurrency")
         try:
-            services = await self.directory.search_services(
+            services = await self.directory.collect_services(
                 request.services,
                 IterationOptions(max_items=maximum_services, max_pages=16),
             )

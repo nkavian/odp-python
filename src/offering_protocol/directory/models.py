@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Generic, TypeVar
+from typing import Generic, Literal, TypeAlias, TypeVar
 
-from pydantic import Field
+from pydantic import Field, JsonValue
 
 from offering_protocol.core.models import (
     AuthenticationRequirement,
@@ -59,6 +59,10 @@ class SearchRequest(OdpModel):
     query: str = ""
 
 
+class ResourceSearchRequest(SearchRequest):
+    types: list[Literal["service", "collection"]] | None = None
+
+
 class DirectoryService(OdpModel):
     description: str
     documentation_url: str = ""
@@ -73,6 +77,50 @@ class DirectoryService(OdpModel):
     status_url: str = ""
     support_url: str = ""
     website_url: str = ""
+
+    @property
+    def service_id(self) -> str | None:
+        value = self.additional.get("service_id")
+        return value if isinstance(value, str) else None
+
+
+class ServiceReference(OdpModel):
+    service_id: str
+    service_origin: str
+    name: str | None = None
+
+
+class CollectionSummary(OdpModel):
+    id: str
+    name: str
+    description: str | None = None
+
+
+class ServiceResult(OdpModel):
+    type: Literal["service"]
+    service: DirectoryService
+    indexed_at: str
+    available_through: ServiceReference | None = None
+
+
+class CollectionResult(OdpModel):
+    type: Literal["collection"]
+    service: DirectoryService
+    indexed_at: str
+    collection: CollectionSummary
+
+
+class UnknownResult(OdpModel):
+    type: str
+    raw: dict[str, JsonValue]
+
+
+DirectoryResult: TypeAlias = ServiceResult | CollectionResult | UnknownResult
+
+
+class DirectoryIssue(OdpModel):
+    index: int
+    message: str
 
 
 class PaymentOptionFacetValue(OdpModel):
@@ -100,7 +148,15 @@ class SearchPage(OdpModel):
     next: str = ""
 
 
+class SearchResponse(OdpModel):
+    facets: Facets | None = None
+    items: list[DirectoryResult]
+    next: str | None = None
+    issues: list[DirectoryIssue] = Field(default_factory=list)
+
+
 class SuggestionRequest(OdpModel):
+    filters: ServiceFilters | None = None
     limit: int = 0
     prefix: str
 

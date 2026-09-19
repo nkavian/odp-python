@@ -195,7 +195,7 @@ async def test_directory_response_edge_cases_and_real_transport_adapter(
                     content_type="application/json",
                 )
             )
-        ).search(SearchRequest())
+        ).search_services(SearchRequest())
     with pytest.raises(DirectoryError):
         await DirectoryClient(
             transport=QueueTransport(
@@ -206,7 +206,7 @@ async def test_directory_response_edge_cases_and_real_transport_adapter(
                     content_type="application/json",
                 )
             )
-        ).search(SearchRequest())
+        ).search_services(SearchRequest())
 
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.host == "93.184.216.34"

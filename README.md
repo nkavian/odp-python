@@ -34,7 +34,78 @@ integration role:
 | Inspect Services and navigate their catalogs | `offering_protocol.agent` |
 | Publish an ODP Service | `offering_protocol.service` |
 
-## Search the Directory
+## Search Services and Collections
+
+`DirectoryClient.search()` searches indexed Services and explicitly submitted Collections.
+The Directory does not crawl complete catalogs or index Offerings.
+
+```python
+import asyncio
+
+from offering_protocol.directory import (
+    CollectionResult,
+    DirectoryClient,
+    ResourceSearchRequest,
+    ServiceResult,
+    UnknownResult,
+)
+
+
+async def main() -> None:
+    async with DirectoryClient() as directory:
+        response = await directory.search(ResourceSearchRequest(query="weather forecast", limit=25))
+        for item in response.items:
+            if isinstance(item, ServiceResult):
+                print("Service:", item.service.name, item.service.service_origin)
+            elif isinstance(item, CollectionResult):
+                print(
+                    "Collection:",
+                    item.collection.name,
+                    item.collection.id,
+                    item.service.service_origin,
+                )
+            elif isinstance(item, UnknownResult):
+                print("Unsupported result type:", item.type)
+        for issue in response.issues:
+            print(f"Skipped result {issue.index}: {issue.message}")
+
+
+asyncio.run(main())
+```
+
+`types=["service"]` or `types=["collection"]` restricts the result types. Omission selects both;
+an explicit list must be nonempty and distinct. Filters apply to the owning Service's metadata.
+Omit the query to browse. The default and maximum result limit are 100.
+
+A Collection is identified by its owning Service origin and case-sensitive Collection ID.
+Inspect that Service's live ODP document, then call `ServiceClient.get_collection()` for current
+details. The result's `indexed_at` describes Collection freshness; `service.indexed_at` describes
+parent freshness. `service.service_id` is the Directory's Service identifier. A Service result can
+have `available_through` platform attribution; a Collection's attribution is its owning `service`.
+
+Malformed known results are omitted and reported in `issues` with their original response index.
+Unknown future types retain their full JSON in `UnknownResult.raw`; do not treat them as Services
+or execute their metadata. Additional fields are available through `additional`. Directory
+metadata does not replace inspection of the Service's own document.
+
+Mixed search does not currently offer continuation. Missing `next` does **not** mean every match
+was returned. Refine the query or filters when needed. `continue_search(next)` follows one opaque
+same-origin reference if the server supplies one; the SDK does not invent continuations. Facets
+count all matching targets, not just returned items: a Service and two Collections count as three.
+Collection search does not require permission to display its card on the Directory landing page.
+
+`suggest(SuggestionRequest(prefix="we", filters=ServiceFilters(keywords=["weather"])))`
+sends POST `/v1/directory/suggestions`. Optional filters use the same `ServiceFilters` as search;
+Collection filters apply to the owning Service. `suggest_services()` remains GET and does not
+accept filters. `suggest()` matches names, descriptions and keywords, but returns
+the **names of matching Services and Collections**, not the text that matched. Matching uses
+substrings and whitespace-separated alternative terms despite the parameter name `prefix`.
+The server deduplicates names; the default and maximum suggestion limit are 25. These strings
+are candidate search queries, not resource identifiers.
+
+See the [runnable canonical Directory example](examples/README.md#canonical-directory-discovery).
+
+## Search only Services
 
 `DirectoryClient` uses the one canonical production Directory. Pass `Environment.SANDBOX` when
 working against InFlow's sandbox; the endpoint itself is not configurable.
@@ -47,7 +118,7 @@ from offering_protocol.directory import DirectoryClient, Environment, SearchRequ
 
 async def main() -> None:
     async with DirectoryClient(Environment.PRODUCTION) as directory:
-        page = await directory.search(
+        page = await directory.search_services(
             SearchRequest(
                 query="indoor plants",
                 filters=ServiceFilters(keywords=["plants"]),
@@ -58,16 +129,29 @@ async def main() -> None:
             print(service.name, service.service_origin)
 
         if page.next:
-            next_page = await directory.continue_search(page.next)
+            next_page = await directory.continue_search_services(page.next)
             print(f"Next page contains {len(next_page.items)} Services")
 
 
 asyncio.run(main())
 ```
 
-Use `search_services()` when the application wants bounded automatic pagination. Search responses
+Use `collect_services()` when the application wants bounded automatic pagination. It stops at the
+item or response limit without fetching another response. Search responses
 provide facets for enrollment protocols, keywords, operations, payment protocols, payment options,
-and trust protocols. Use `suggest()` to discover keyword completions supported by the Directory.
+and trust protocols. Use `suggest_services()` to discover Service-only keyword completions.
+
+### API migration
+
+- Service-only `search()` calls become `search_services()`, and `continue_search()` calls become
+  `continue_search_services()`.
+- Aggregating `search_services(request, options)` calls become `collect_services(request, options)`.
+- `search_pages()` is removed. Applications that need individual Service-only responses can call
+  `search_services()` and follow `continue_search_services()` with their own explicit limit.
+- Service-only `suggest()` calls become `suggest_services()`.
+- `search()`, `continue_search()`, and `suggest()` select mixed discovery.
+
+`Agent` federated Offering discovery remains Service-only and uses `collect_services()`.
 
 ## Inspect and navigate a Service
 

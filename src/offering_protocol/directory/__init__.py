@@ -6,6 +6,10 @@ from offering_protocol.directory.client import (
     DirectoryRequestError,
 )
 from offering_protocol.directory.models import (
+    CollectionResult,
+    CollectionSummary,
+    DirectoryIssue,
+    DirectoryResult,
     DirectoryService,
     Environment,
     Facet,
@@ -14,10 +18,15 @@ from offering_protocol.directory.models import (
     OperationFilter,
     PaymentFilter,
     PaymentOptionFacetValue,
+    ResourceSearchRequest,
     SearchPage,
     SearchRequest,
+    SearchResponse,
     ServiceFilters,
+    ServiceReference,
+    ServiceResult,
     SuggestionRequest,
+    UnknownResult,
 )
 from offering_protocol.directory.transport import (
     HttpRequest,
@@ -28,9 +37,13 @@ from offering_protocol.directory.transport import (
 )
 
 __all__ = [
+    "CollectionResult",
+    "CollectionSummary",
     "DirectoryClient",
     "DirectoryError",
+    "DirectoryIssue",
     "DirectoryRequestError",
+    "DirectoryResult",
     "DirectoryService",
     "Environment",
     "Facet",
@@ -42,10 +55,15 @@ __all__ = [
     "OperationFilter",
     "PaymentFilter",
     "PaymentOptionFacetValue",
+    "ResourceSearchRequest",
     "SearchPage",
     "SearchRequest",
+    "SearchResponse",
     "ServiceFilters",
+    "ServiceReference",
+    "ServiceResult",
     "SuggestionRequest",
     "Transport",
     "TransportError",
+    "UnknownResult",
 ]
