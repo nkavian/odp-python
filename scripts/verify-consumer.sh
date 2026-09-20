@@ -37,6 +37,8 @@ assert agent.__name__ == "offering_protocol.agent"
 assert core.__name__ == "offering_protocol.core"
 assert directory.__name__ == "offering_protocol.directory"
 assert service.__name__ == "offering_protocol.service"
+request = directory.ResourceSearchRequest(types=["collection"])
+assert request.to_dict() == {"types": ["collection"]}
 document = core.parse_service_document(
     b'{"description":"Consumer smoke test","http":{"endpoint_base":"/odp"},'
     b'"language":"en","localizations":["en"],"name":"Consumer",'

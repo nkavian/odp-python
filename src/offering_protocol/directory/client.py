@@ -16,10 +16,13 @@ from offering_protocol.directory.models import (
     DirectoryService,
     Environment,
     IterationOptions,
+    ResourceSearchRequest,
     SearchPage,
     SearchRequest,
+    SearchResponse,
     SuggestionRequest,
 )
+from offering_protocol.directory.results import parse_search_response
 from offering_protocol.directory.transport import (
     HttpRequest,
     HttpResponse,
@@ -63,7 +66,26 @@ class DirectoryClient:
         if self._owns_transport:
             await self._transport.aclose()
 
-    async def search(self, request: SearchRequest) -> SearchPage:
+    async def search(self, request: ResourceSearchRequest) -> SearchResponse:
+        _validate_search_request(request)
+        if request.types is not None and (
+            not request.types or len(set(request.types)) != len(request.types)
+        ):
+            raise DirectoryError("types must contain distinct service or collection values")
+        response = await self._request(
+            "POST",
+            f"{self.environment.origin}/v1/directory/search",
+            json.dumps(
+                request.model_dump(mode="json", exclude_defaults=True, exclude_none=True)
+            ).encode(),
+        )
+        return _parse_mixed_response(response.body)
+
+    async def continue_search(self, next_reference: str) -> SearchResponse:
+        response = await self._request("GET", self._continuation_url(next_reference))
+        return _parse_mixed_response(response.body)
+
+    async def search_services(self, request: SearchRequest) -> SearchPage:
         _validate_search_request(request)
         response = await self._request(
             "POST",
@@ -72,54 +94,72 @@ class DirectoryClient:
         )
         return _parse_search_page(response.body)
 
-    async def continue_search(self, next_reference: str) -> SearchPage:
+    def _continuation_url(self, next_reference: str) -> str:
+        if not next_reference.strip():
+            raise DirectoryError("Directory continuation is empty")
         target = urljoin(f"{self.environment.origin}/", next_reference)
         if derive_service_origin(target) != self.environment.origin:
             raise DirectoryError("Directory continuation changed canonical origin")
-        response = await self._request("GET", target)
+        return target
+
+    async def continue_search_services(self, next_reference: str) -> SearchPage:
+        response = await self._request("GET", self._continuation_url(next_reference))
         return _parse_search_page(response.body)
 
-    async def search_pages(
-        self, request: SearchRequest, options: IterationOptions | None = None
-    ) -> list[SearchPage]:
-        options = options or IterationOptions()
-        maximum_pages = _bounded(options.max_pages, 16, 16, "max_pages")
-        pages: list[SearchPage] = []
-        page = await self.search(request)
-        for page_number in range(maximum_pages):
-            pages.append(page)
-            if not page.next:
-                break
-            if page_number + 1 < maximum_pages:
-                page = await self.continue_search(page.next)
-        return pages
-
-    async def search_services(
+    async def collect_services(
         self, request: SearchRequest, options: IterationOptions | None = None
     ) -> list[DirectoryService]:
         options = options or IterationOptions()
         maximum_items = _bounded(options.max_items, 10_000, 10_000, "max_items")
+        maximum_responses = _bounded(options.max_pages, 16, 16, "max_pages")
         services: list[DirectoryService] = []
-        for page in await self.search_pages(request, options):
+        page = await self.search_services(request)
+        response_count = 1
+        while True:
             services.extend(page.items[: maximum_items - len(services)])
-            if len(services) == maximum_items:
+            if (
+                not page.next
+                or len(services) == maximum_items
+                or response_count == maximum_responses
+            ):
                 break
+            page = await self.continue_search_services(page.next)
+            response_count += 1
         return services
 
     async def suggest(self, request: SuggestionRequest) -> list[str]:
+        return await self._suggestions("/v1/directory/suggestions", request, mixed=True)
+
+    async def suggest_services(self, request: SuggestionRequest) -> list[str]:
+        return await self._suggestions("/v1/services/suggestions", request)
+
+    async def _suggestions(
+        self, path: str, request: SuggestionRequest, *, mixed: bool = False
+    ) -> list[str]:
         prefix = request.prefix.strip()
         if not prefix or len(prefix) > 128:
             raise DirectoryError("prefix must contain from 1 through 128 characters")
-        if request.limit > 25:
+        if request.limit < 0 or request.limit > 25:
             raise DirectoryError("limit must be from 1 through 25")
-        query = {"prefix": prefix}
-        if request.limit:
-            query["limit"] = str(request.limit)
-        response = await self._request(
-            "GET", f"{self.environment.origin}/v1/services/suggestions?{urlencode(query)}"
-        )
+        if mixed:
+            _validate_search_request(SearchRequest(filters=request.filters))
+            payload = request.model_dump(mode="json", exclude_defaults=True, exclude_none=True)
+            payload["prefix"] = prefix
+            response = await self._request(
+                "POST", f"{self.environment.origin}{path}", json.dumps(payload).encode()
+            )
+        else:
+            if request.filters is not None:
+                raise DirectoryError("Service-only suggestions do not support filters")
+            query = {"prefix": prefix}
+            if request.limit:
+                query["limit"] = str(request.limit)
+            response = await self._request(
+                "GET", f"{self.environment.origin}{path}?{urlencode(query)}"
+            )
         try:
-            suggestions = json.loads(response.body)
+            envelope = json.loads(response.body)
+            suggestions = envelope.get("items") if isinstance(envelope, dict) else None
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise DirectoryError(f"invalid Directory suggestions: {error}") from error
         if (
@@ -159,6 +199,13 @@ class DirectoryClient:
                 body = b""
             target = next_target
         raise DirectoryError("Directory response exceeded its redirect limit")
+
+
+def _parse_mixed_response(body: bytes) -> SearchResponse:
+    try:
+        return parse_search_response(body)
+    except ValueError as error:
+        raise DirectoryError(f"invalid Directory response: {error}") from error
 
 
 def _parse_search_page(body: bytes) -> SearchPage:
@@ -210,7 +257,7 @@ def _normalize_service_protocols(item: dict[str, object]) -> None:
 
 
 def _validate_search_request(request: SearchRequest) -> None:
-    if request.limit > 100:
+    if request.limit < 0 or request.limit > 100:
         raise DirectoryError("limit must be from 1 through 100")
     if request.query.strip() != request.query or len(request.query) > 512:
         raise DirectoryError(

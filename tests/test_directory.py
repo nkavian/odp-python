@@ -50,16 +50,17 @@ async def test_searches_continues_and_iterates_canonical_directory() -> None:
         response(DIRECTORY_PAGE, content_type="application/json"),
     )
     client = DirectoryClient(transport=transport)
-    pages = await client.search_pages(
+    first_page = await client.search_services(
         SearchRequest(
             query="plants",
             filters=ServiceFilters(trust=[TrustProtocol(name=Protocol.TAP)]),
         )
     )
-    assert len(pages) == 2
-    assert pages[0].items[0].name == "Indica Flowers"
-    assert pages[0].facets is not None
-    assert pages[0].facets.trust[0].value == TrustProtocol(name=Protocol.TAP)
+    second_page = await client.continue_search_services(first_page.next)
+    assert len(second_page.items) == 1
+    assert first_page.items[0].name == "Indica Flowers"
+    assert first_page.facets is not None
+    assert first_page.facets.trust[0].value == TrustProtocol(name=Protocol.TAP)
     assert transport.requests[0].url == "https://api.inflowpay.ai/v1/services/search"
     assert transport.requests[0].method == "POST"
     assert transport.requests[1].method == "GET"
@@ -75,14 +76,14 @@ async def test_search_services_is_bounded_and_suggestions_are_typed() -> None:
         Environment.SANDBOX,
         transport=QueueTransport(
             response(DIRECTORY_PAGE, content_type="application/json"),
-            response('["plant","planter"]', content_type="application/json"),
+            response('{"items":["plant","planter"]}', content_type="application/json"),
         ),
     )
-    services = await client.search_services(
+    services = await client.collect_services(
         SearchRequest(), IterationOptions(max_items=1, max_pages=1)
     )
     assert services[0].service_origin == "https://demo.inflowpay.ai"
-    assert await client.suggest(SuggestionRequest(prefix="pla", limit=2)) == [
+    assert await client.suggest_services(SuggestionRequest(prefix="pla", limit=2)) == [
         "plant",
         "planter",
     ]
@@ -99,7 +100,7 @@ async def test_search_filters_unknown_protocols_and_rejects_malformed_known() ->
     candidate = DIRECTORY_PAGE.replace('"items":[{', '"items":[{' + protocols)
     page = await DirectoryClient(
         transport=QueueTransport(response(candidate, content_type="application/json"))
-    ).search(SearchRequest())
+    ).search_services(SearchRequest())
     parsed = page.items[0].protocols
     assert parsed is not None
     assert not parsed.enrollment
@@ -116,14 +117,14 @@ async def test_search_filters_unknown_protocols_and_rejects_malformed_known() ->
     ).replace(',{"name":"tap"}', "")
     page = await DirectoryClient(
         transport=QueueTransport(response(unknown_only, content_type="application/json"))
-    ).search(SearchRequest())
+    ).search_services(SearchRequest())
     assert page.items[0].protocols is None
 
     malformed = candidate.replace('"name":"mpp"', '"name":"mpp","extra":true')
     with pytest.raises(DirectoryError):
         await DirectoryClient(
             transport=QueueTransport(response(malformed, content_type="application/json"))
-        ).search(SearchRequest())
+        ).search_services(SearchRequest())
 
 
 @pytest.mark.asyncio
@@ -132,7 +133,7 @@ async def test_follows_same_origin_redirect_and_changes_post_to_get() -> None:
         response(b"", headers={"location": "/redirect"}, status=303),
         response(DIRECTORY_PAGE, content_type="application/json"),
     )
-    await DirectoryClient(transport=transport).search(SearchRequest())
+    await DirectoryClient(transport=transport).search_services(SearchRequest())
     assert [request.method for request in transport.requests] == ["POST", "GET"]
 
 
@@ -150,7 +151,7 @@ async def test_follows_same_origin_redirect_and_changes_post_to_get() -> None:
 )
 async def test_rejects_invalid_searches(candidate: SearchRequest) -> None:
     with pytest.raises(DirectoryError):
-        await DirectoryClient(transport=QueueTransport()).search(candidate)
+        await DirectoryClient(transport=QueueTransport()).search_services(candidate)
 
 
 @pytest.mark.asyncio
@@ -178,7 +179,9 @@ async def test_rejects_invalid_responses_and_continuations() -> None:
     ]
     for candidate in scenarios[:5]:
         with pytest.raises(DirectoryError):
-            await DirectoryClient(transport=QueueTransport(candidate)).search(SearchRequest())
+            await DirectoryClient(transport=QueueTransport(candidate)).search_services(
+                SearchRequest()
+            )
     with pytest.raises(DirectoryError):
         await DirectoryClient(transport=QueueTransport(scenarios[5])).suggest(
             SuggestionRequest(prefix="b")
@@ -198,7 +201,7 @@ async def test_request_error_exposes_status_and_headers() -> None:
                     "blocked", content_type="text/plain", headers={"retry-after": "1"}, status=429
                 )
             )
-        ).search(SearchRequest())
+        ).search_services(SearchRequest())
     assert caught.value.status == 429
     assert caught.value.headers["retry-after"] == "1"
 
@@ -208,22 +211,22 @@ async def test_rejects_redirect_failures_and_iteration_bounds() -> None:
     with pytest.raises(DirectoryError):
         await DirectoryClient(
             transport=QueueTransport(response(b"", headers={}, status=302))
-        ).search(SearchRequest())
+        ).search_services(SearchRequest())
     with pytest.raises(DirectoryError):
         await DirectoryClient(
             transport=QueueTransport(
                 response(b"", headers={"location": "https://other.example"}, status=302)
             )
-        ).search(SearchRequest())
+        ).search_services(SearchRequest())
     redirects = [response(b"", headers={"location": "/again"}, status=307) for _ in range(6)]
     with pytest.raises(DirectoryError):
-        await DirectoryClient(transport=QueueTransport(*redirects)).search(SearchRequest())
+        await DirectoryClient(transport=QueueTransport(*redirects)).search_services(SearchRequest())
     with pytest.raises(DirectoryError):
-        await DirectoryClient(transport=QueueTransport()).search_pages(
+        await DirectoryClient(transport=QueueTransport()).collect_services(
             SearchRequest(), IterationOptions(max_pages=17)
         )
     with pytest.raises(DirectoryError):
-        await DirectoryClient(transport=QueueTransport()).search_services(
+        await DirectoryClient(transport=QueueTransport()).collect_services(
             SearchRequest(), IterationOptions(max_items=10_001)
         )
 
@@ -235,11 +238,11 @@ async def test_iteration_can_stop_at_page_limit_and_redirect_loop_is_exhaustive(
     first = DIRECTORY_PAGE[:-2] + ',"next":"/v1/services/search?cursor=two"}'
     pages = await DirectoryClient(
         transport=QueueTransport(response(first, content_type="application/json"))
-    ).search_pages(SearchRequest(), IterationOptions(max_pages=1))
+    ).collect_services(SearchRequest(), IterationOptions(max_pages=1))
     assert len(pages) == 1
     monkeypatch.setattr("offering_protocol.directory.client._MAXIMUM_REDIRECTS", -1)
     with pytest.raises(DirectoryError, match="redirect limit"):
-        await DirectoryClient(transport=QueueTransport()).search(SearchRequest())
+        await DirectoryClient(transport=QueueTransport()).search_services(SearchRequest())
 
 
 @pytest.mark.asyncio
