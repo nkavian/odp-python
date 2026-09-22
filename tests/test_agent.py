@@ -276,15 +276,18 @@ async def test_builds_agent_friendly_offering_details_without_invoking_action() 
     transport = QueueTransport(
         response(SERVICE_DOCUMENT),
         response(ACTION_OFFERING),
-        response(schema, content_type="application/schema+json"),
     )
+    supporting = QueueTransport(response(schema, content_type="application/schema+json"))
     details = await ServiceClient(
-        "https://demo.inflowpay.ai", transport=transport
+        "https://demo.inflowpay.ai", transport=transport, supporting_transport=supporting
     ).get_offering_details("rubber-plant")
     assert details.actions[0].http is not None
     assert details.actions[0].http.url == "https://demo.inflowpay.ai/actions/purchase"
     assert details.attribute_schema is not None
-    assert len(transport.requests) == 3
+    assert len(transport.requests) == 2
+    assert len(supporting.requests) == 1
+    assert [request.maximum_response_bytes for request in transport.requests] == [65_536, 524_288]
+    assert supporting.requests[0].maximum_response_bytes == 262_144
 
 
 DIRECTORY_PAGE = """{
@@ -447,6 +450,8 @@ async def test_resolves_http_action_request_schema() -> None:
         transport=QueueTransport(
             response(SERVICE_DOCUMENT),
             response(offering),
+        ),
+        supporting_transport=QueueTransport(
             response(schema, content_type="application/schema+json"),
             response(schema, content_type="application/schema+json"),
             response(schema, content_type="application/schema+json"),
@@ -476,22 +481,26 @@ async def test_resolves_openapi_action_and_rejects_invalid_openapi() -> None:
       "openapi":"3.1.0","paths":{"/purchase":{"post":{
       "operationId":"purchasePlant","responses":{}}}}
     }"""
+    supporting = QueueTransport(response(openapi, content_type="application/json"))
     client = ServiceClient(
         "https://demo.inflowpay.ai",
         transport=QueueTransport(
             response(document),
             response(offering),
-            response(openapi, content_type="application/json"),
         ),
+        supporting_transport=supporting,
     )
     resolved = await client.resolve_action("plant", "purchase")
     assert resolved.operation == {"operationId": "purchasePlant", "responses": {}}
+    assert supporting.requests[0].maximum_response_bytes == 1_048_576
 
     invalid_client = ServiceClient(
         "https://demo.inflowpay.ai",
         transport=QueueTransport(
             response(document),
             response(offering),
+        ),
+        supporting_transport=QueueTransport(
             response('{"openapi":"3.0.0"}', content_type="application/json"),
         ),
     )
@@ -522,6 +531,8 @@ async def test_offering_details_report_unusable_actions_and_attributes() -> None
         transport=QueueTransport(
             response(SERVICE_DOCUMENT),
             response(offering),
+        ),
+        supporting_transport=QueueTransport(
             response(schema, content_type="application/schema+json"),
         ),
     )
@@ -564,7 +575,7 @@ async def test_supporting_document_security_and_cache_edges() -> None:
     revalidating = ServiceClient(
         "https://demo.inflowpay.ai",
         cache=cache,
-        transport=QueueTransport(response(b"", status=304)),
+        supporting_transport=QueueTransport(response(b"", status=304)),
     )
     assert await revalidating._supporting_json(
         "https://schemas.example/a", "schema", "application/json", {"application/json"}, 100
@@ -721,9 +732,8 @@ async def test_agent_remaining_traversal_and_supporting_document_edges() -> None
 async def test_action_resolution_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
     details = await ServiceClient(
         "https://demo.inflowpay.ai",
-        transport=QueueTransport(
-            response(SERVICE_DOCUMENT), response(ACTION_OFFERING), response(b"", status=500)
-        ),
+        transport=QueueTransport(response(SERVICE_DOCUMENT), response(ACTION_OFFERING)),
+        supporting_transport=QueueTransport(response(b"", status=500)),
     ).get_offering_details("rubber-plant")
     assert details.attribute_schema is None
     assert details.issues[0].scope.value == "attribute_schema"
@@ -798,6 +808,8 @@ async def test_action_resolution_boundaries(monkeypatch: pytest.MonkeyPatch) -> 
                 )
             ),
             response(offering),
+        ),
+        supporting_transport=QueueTransport(
             response(duplicate, content_type="application/json"),
         ),
     )

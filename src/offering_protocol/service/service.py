@@ -555,6 +555,11 @@ def _problem(
 
 
 def _encode(value: object) -> bytes:
+    if isinstance(value, Page):
+        document = value.model_dump(mode="json", by_alias=True, exclude_unset=True)
+        for item in document["items"]:
+            item.pop("odp_version", None)
+        return json.dumps(document, separators=(",", ":"), ensure_ascii=False).encode()
     if hasattr(value, "model_dump_json"):
         encoded = value.model_dump_json(by_alias=True, exclude_unset=True)
         return cast(str, encoded).encode()

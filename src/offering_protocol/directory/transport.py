@@ -20,6 +20,7 @@ class HttpRequest:
     url: str
     headers: dict[str, str] = field(default_factory=dict)
     body: bytes = b""
+    maximum_response_bytes: int = 524_288
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +32,10 @@ class HttpResponse:
 
 class TransportError(RuntimeError):
     """Raised when the HTTP transport cannot complete a request."""
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class Transport(Protocol):
@@ -49,6 +54,8 @@ class HttpxTransport:
 
     async def send(self, request: HttpRequest) -> HttpResponse:
         try:
+            if request.maximum_response_bytes <= 0:
+                raise ValueError("maximum_response_bytes must be positive")
             target, hostname, host_header = await _pinned_target(
                 request.url, self._allow_local_network
             )
@@ -78,14 +85,36 @@ class HttpxTransport:
                 content=request.body,
                 extensions={"sni_hostname": hostname},
             )
-            response = await client.send(outgoing, follow_redirects=False)
+            response = await client.send(outgoing, follow_redirects=False, stream=True)
+            try:
+                body = bytearray()
+                if request.method.upper() != "HEAD" and not 300 <= response.status_code < 400:
+                    success = 200 <= response.status_code < 300
+                    maximum = (
+                        request.maximum_response_bytes
+                        if success
+                        else min(request.maximum_response_bytes, 16_384)
+                    )
+                    async for chunk in response.aiter_bytes():
+                        if len(chunk) > maximum - len(body):
+                            if success:
+                                raise TransportError(
+                                    "HTTP response exceeds its byte limit",
+                                    code="RESPONSE_LIMIT_EXCEEDED",
+                                )
+                            # Preserve the HTTP failure without exposing truncated error JSON.
+                            body.clear()
+                            break
+                        body.extend(chunk)
+                return HttpResponse(
+                    status=response.status_code,
+                    headers={name.lower(): value for name, value in response.headers.items()},
+                    body=bytes(body),
+                )
+            finally:
+                await response.aclose()
         except (httpx.HTTPError, OSError, ValueError) as error:
             raise TransportError(f"HTTP transport failed: {error}") from error
-        return HttpResponse(
-            status=response.status_code,
-            headers={name.lower(): value for name, value in response.headers.items()},
-            body=response.content,
-        )
 
     async def aclose(self) -> None:
         if self._client is not None:

@@ -91,6 +91,10 @@ class TraversalOptions:
 class AgentError(RuntimeError):
     """Base error for Service discovery operations."""
 
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
 
 class UnsupportedOperationError(AgentError):
     def __init__(self, operation: Operation) -> None:
@@ -132,7 +136,12 @@ class ServiceClient:
         self._cache_partition = cache_partition
         self._owns_transport = transport is None
         self._transport = transport or HttpxTransport(allow_local_network=allow_local_network)
-        self._supporting_transport = supporting_transport or self._transport
+        self._owns_supporting_transport = supporting_transport is None
+        self._supporting_transport = (
+            supporting_transport
+            if supporting_transport is not None
+            else HttpxTransport(allow_local_network=allow_local_network)
+        )
 
     async def __aenter__(self) -> ServiceClient:
         return self
@@ -141,8 +150,12 @@ class ServiceClient:
         await self.aclose()
 
     async def aclose(self) -> None:
-        if self._owns_transport:
-            await self._transport.aclose()
+        try:
+            if self._owns_transport:
+                await self._transport.aclose()
+        finally:
+            if self._owns_supporting_transport:
+                await self._supporting_transport.aclose()
 
     async def inspect(self) -> Inspection:
         requested_url = f"{self.service_origin}/.well-known/odp"
@@ -399,7 +412,9 @@ class ServiceClient:
                 headers["if-none-match"] = cached.etag
             if cached.last_modified:
                 headers["if-modified-since"] = cached.last_modified
-        response, final_url = await self._request_raw(method, request_target, body, headers)
+        response, final_url = await self._request_raw(
+            method, request_target, body, headers, maximum_bytes
+        )
         if response.status == 304:
             if cached is None:
                 raise AgentError("ODP response returned 304 without a cached representation")
@@ -435,7 +450,7 @@ class ServiceClient:
         return _FetchedResponse(response.body, final_url, Freshness.FETCHED)
 
     async def _request_raw(
-        self, method: str, target: str, body: bytes, conditional: dict[str, str]
+        self, method: str, target: str, body: bytes, conditional: dict[str, str], maximum_bytes: int
     ) -> tuple[HttpResponse, str]:
         redirect_origin = derive_service_origin(target)
         for redirects in range(_MAXIMUM_REDIRECTS + 1):
@@ -445,9 +460,11 @@ class ServiceClient:
             if body:
                 headers["content-type"] = MEDIA_TYPE
             try:
-                response = await self._transport.send(HttpRequest(method, target, headers, body))
+                response = await self._transport.send(
+                    HttpRequest(method, target, headers, body, maximum_response_bytes=maximum_bytes)
+                )
             except TransportError as error:
-                raise AgentError(f"ODP Service request failed: {error}") from error
+                raise AgentError(f"ODP Service request failed: {error}", code=error.code) from error
             if response.status not in {301, 302, 303, 307, 308}:
                 return response, target
             if redirects == _MAXIMUM_REDIRECTS:
@@ -499,10 +516,17 @@ class ServiceClient:
             visited.add(current)
             try:
                 response = await self._supporting_transport.send(
-                    HttpRequest("GET", current, {"accept": accept, **conditional})
+                    HttpRequest(
+                        "GET",
+                        current,
+                        {"accept": accept, **conditional},
+                        maximum_response_bytes=maximum_bytes,
+                    )
                 )
             except TransportError as error:
-                raise AgentError(f"ODP supporting document request failed: {error}") from error
+                raise AgentError(
+                    f"ODP supporting document request failed: {error}", code=error.code
+                ) from error
             if response.status in {301, 302, 303, 307, 308}:
                 if redirects == _MAXIMUM_REDIRECTS:
                     raise AgentError("ODP supporting document exceeded five redirects")
@@ -544,7 +568,9 @@ class ServiceClient:
                     response.headers,
                 )
             if len(response.body) > maximum_bytes:
-                raise AgentError("ODP supporting document exceeds its byte limit")
+                raise AgentError(
+                    "ODP supporting document exceeds its byte limit", code="RESPONSE_LIMIT_EXCEEDED"
+                )
             content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
             if content_type not in media_types:
                 raise AgentError("ODP supporting document has an unsupported media type")
@@ -643,7 +669,7 @@ def _consume(response: HttpResponse, maximum_bytes: int, maximum_depth: int) -> 
     if not 200 <= response.status < 300:
         raise ServiceRequestError(response.status, _problem_message(response), response.headers)
     if len(response.body) > maximum_bytes:
-        raise AgentError("ODP response exceeds its byte limit")
+        raise AgentError("ODP response exceeds its byte limit", code="RESPONSE_LIMIT_EXCEEDED")
     content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     if content_type != MEDIA_TYPE:
         raise AgentError(f"ODP response must use {MEDIA_TYPE}")

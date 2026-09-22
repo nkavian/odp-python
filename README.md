@@ -203,9 +203,10 @@ The Agent module also provides:
 - Conditional request and representation caching with injectable `Cache` and `Transport` protocols.
 
 Default fallback cache lifetimes are four hours for Service documents, one hour for Collections,
-and five minutes for Offerings. HTTP cache directives take precedence. Provide distinct `transport`
-and `supporting_transport` instances when protocol resources and linked schemas require different
-credentials or network policy.
+and five minutes for Offerings. HTTP cache directives take precedence. `ServiceClient` uses a
+separate anonymous transport for linked schemas and OpenAPI documents, even when its primary
+`transport` has authentication configured. An explicit `supporting_transport` override must also
+send these requests anonymously; it must not share the primary transport's credentials or cookies.
 
 ### Search across Services
 
@@ -268,6 +269,12 @@ invoke the resolved target.
 must survive process restarts or share storage across workers. A custom `Transport` implements
 asynchronous `send()` and `aclose()` methods. Caller-provided caches and transports remain owned by
 the caller.
+
+`HttpRequest.maximum_response_bytes` gives a custom transport the response budget. Enforce it while
+reading, rather than buffering the complete response first. The built-in transport closes responses
+on overflow, read failure, and cancellation. A successful response exceeding its budget raises
+`TransportError` with `code="RESPONSE_LIMIT_EXCEEDED"`; `ServiceClient` preserves that code on
+`AgentError`. Oversized error bodies are discarded while retaining the HTTP status and headers.
 
 The built-in HTTP transport resolves and validates every destination before connecting, pins the
 connection to a validated public address, does not inherit proxy settings from the environment, and
@@ -348,7 +355,9 @@ Directory results filter unrecognized enrollment, payment, and trust descriptors
 strict validation for recognized descriptors.
 
 Individual Offering and Collection GETs default to full representations; list and search operations
-default to terse items. A Catalog receives the requested language in `CatalogRequest.language` and
+default to terse items. The Service handler writes `odp_version` on standalone resources and page
+envelopes, omitting it from embedded page items without changing the Catalog's models.
+A Catalog receives the requested language in `CatalogRequest.language` and
 declares the language it actually returns on each resource. Static catalogs do not translate content.
 
 Refinement parsing detects duplicate JSON values without guessing the type of a string. Comparing
@@ -366,6 +375,10 @@ Each role exposes typed errors:
 Protocol models preserve additive members in `model.additional` and round-trip them through
 `model.to_dict()`. Parsing remains strict for normative constraints and fields that prohibit unknown
 members.
+
+Directory records retain additional metadata such as branding and MCP endpoints. These are discovery
+hints, not authorization or authoritative routing data. The default Agent factory uses the record's
+`service_origin` and retrieves that Service's own document before making catalog requests.
 
 Handle the narrowest error that the application can act upon and use the role's base error for the
 remaining failures:

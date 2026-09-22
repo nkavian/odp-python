@@ -115,7 +115,7 @@ async def test_serves_document_offerings_and_collections() -> None:
     full_offerings = await service.handle(
         Request("GET", "/odp/offerings", query="representation=full")
     )
-    assert json.loads(full_offerings.body)["items"][0]["odp_version"] == "1.0"
+    assert "odp_version" not in json.loads(full_offerings.body)["items"][0]
     full_collections = await service.handle(
         Request("GET", "/odp/collections", query="representation=full")
     )
@@ -178,6 +178,78 @@ class SearchCatalog(StaticCatalog):
     ) -> Page[Collection]:
         del query
         return await self.list_collections(request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("representation", ["full", "terse"])
+async def test_only_top_level_resources_emit_versions(representation: str) -> None:
+    service = _service(SearchCatalog(_catalog_options()))
+    for path in (
+        "/odp/offerings",
+        "/odp/collections",
+        "/odp/collections/plants/offerings",
+        "/odp/offerings/search",
+        "/odp/collections/search",
+    ):
+        search = path.endswith("/search")
+        result = await service.handle(
+            Request(
+                "POST" if search else "GET",
+                path,
+                query=f"representation={representation}",
+                headers={"content-type": MEDIA_TYPE},
+                body=b'{"odp_version":"1.0","query":"plant"}' if search else b"",
+            )
+        )
+        assert result.status == 200
+        page = json.loads(result.body)
+        assert page["odp_version"] == "1.0"
+        assert page["items"]
+        assert all("odp_version" not in item for item in page["items"])
+    for path in ("/odp/offerings/rubber-plant", "/odp/collections/plants"):
+        result = await service.handle(
+            Request("GET", path, query=f"representation={representation}")
+        )
+        assert result.status == 200
+        assert json.loads(result.body)["odp_version"] == "1.0"
+
+
+@pytest.mark.asyncio
+async def test_page_serialization_does_not_mutate_cached_catalog_models() -> None:
+    offering = Offering.model_validate(
+        {
+            "odp_version": "1.0",
+            "id": "item",
+            "name": "Item",
+            "custom_data": {"odp_version": "business-value"},
+        }
+    )
+    page = OfferingPage[Offering](odp_version="1.0", items=[offering])
+    before = page.model_dump()
+    fields = offering.model_fields_set.copy()
+
+    class CachedCatalog(Catalog):
+        def operations(self) -> list[Operation]:
+            return [Operation.LIST_OFFERINGS, Operation.GET_OFFERING]
+
+        async def list_offerings(self, request: CatalogRequest) -> OfferingPage[Offering]:
+            return page
+
+        async def get_offering(self, identifier: str, request: CatalogRequest) -> Offering:
+            return offering
+
+    service = _service(CachedCatalog())
+    for _ in range(2):
+        result = await service.handle(Request("GET", "/odp/offerings", query="representation=full"))
+        assert result.status == 200
+        item = json.loads(result.body)["items"][0]
+        assert "odp_version" not in item
+        assert item["custom_data"] == {"odp_version": "business-value"}
+        standalone = await service.handle(Request("GET", "/odp/offerings/item"))
+        assert standalone.status == 200
+        assert json.loads(standalone.body)["odp_version"] == "1.0"
+    assert page.model_dump() == before
+    assert offering.model_fields_set == fields
 
 
 @pytest.mark.asyncio

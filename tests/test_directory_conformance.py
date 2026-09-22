@@ -242,16 +242,11 @@ async def test_refuses_a_recognized_descriptor_that_breaks_its_own_rules() -> No
     assert page.issues[0].index == 0
 
 
-# -- nothing unchecked is passed off as checked -----------------------------------------------
+# -- Directory metadata is retained without becoming execution authority ----------------------
 
 
 @pytest.mark.asyncio
-async def test_drops_service_document_members_it_does_not_validate() -> None:
-    """A caller reading these off a record cannot tell they were never checked.
-
-    `http` is the one that matters: a caller could build request URLs from an `endpoint_base` the
-    Directory invented, which is exactly the authority ROLE-03 says a Directory does not have.
-    """
+async def test_preserves_unverified_metadata_in_additional_members() -> None:
     page = await read(
         amend(
             branding={"icon": {"src": "/i.png"}, "logo": {"src": "/l.png"}},
@@ -263,7 +258,14 @@ async def test_drops_service_document_members_it_does_not_validate() -> None:
         )
     )
 
-    assert not set(page.items[0].additional)
+    assert page.items[0].additional == {
+        "branding": {"icon": {"src": "/i.png"}, "logo": {"src": "/l.png"}},
+        "http": {"endpoint_base": "/somewhere-else"},
+        "mcp": [{"type": "streamable-http", "url": "https://elsewhere.example/mcp"}],
+        "odp_version": "1.0",
+        "payment_origins": ["https://pay.example"],
+        "search_capabilities": {"filters": {"inline": []}},
+    }
 
 
 @pytest.mark.asyncio

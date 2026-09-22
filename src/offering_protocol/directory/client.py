@@ -42,19 +42,6 @@ _MAXIMUM_ERROR_CHARACTERS = 2_048
 _RFC_3339 = re.compile(
     r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$"
 )
-#: Service Document members a Directory result may echo that this client does not validate.
-#:
-#: They are dropped rather than passed through, because a caller reading them off a record has no
-#: way to tell they were never checked. `http` is the one that matters most: a caller could build
-#: request URLs from an `endpoint_base` a Directory made up.
-_UNVERIFIED_MEMBERS = (
-    "branding",
-    "http",
-    "mcp",
-    "odp_version",
-    "payment_origins",
-    "search_capabilities",
-)
 
 
 class DirectoryError(RuntimeError):
@@ -288,8 +275,7 @@ def _read_service(entry: object) -> dict[str, object]:
     document = _validate_as_service_document(item)
     # `protocols` is reinstated from the validated document only when something survived agent
     # filtering, so a block naming nothing this ODP version knows does not pass straight through.
-    for member in (*_UNVERIFIED_MEMBERS, "protocols"):
-        item.pop(member, None)
+    item.pop("protocols", None)
     if document.protocols is not None:
         item["protocols"] = document.protocols.model_dump(mode="json", exclude_defaults=True)
     item["operations"] = [operation.model_dump(mode="json") for operation in document.operations]
