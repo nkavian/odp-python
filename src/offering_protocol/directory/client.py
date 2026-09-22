@@ -248,11 +248,11 @@ def _parse_search_page(body: bytes) -> SearchPage:
         raise DirectoryError("invalid Directory response: search page has no items")
     if len(raw["items"]) > 100:
         raise DirectoryError("Directory search page exceeds 100 Services")
-    items: list[dict[str, object]] = []
+    items: list[DirectoryService] = []
     issues: list[ServiceIssue] = []
     for index, entry in enumerate(raw["items"]):
         try:
-            items.append(_read_service(entry))
+            items.append(DirectoryService.model_validate(_read_service(entry)))
         except (ModelValidationError, OdpValidationError, ReferenceError, DirectoryError) as error:
             issues.append(ServiceIssue(index=index, message=str(error)))
     try:
@@ -292,6 +292,7 @@ def _read_service(entry: object) -> dict[str, object]:
         item.pop(member, None)
     if document.protocols is not None:
         item["protocols"] = document.protocols.model_dump(mode="json", exclude_defaults=True)
+    item["operations"] = [operation.model_dump(mode="json") for operation in document.operations]
     return item
 
 

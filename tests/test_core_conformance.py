@@ -34,6 +34,22 @@ def amend(base: dict[str, Any], **changes: Any) -> str:
     return json.dumps({**base, **changes})
 
 
+@pytest.mark.parametrize("version", ["1.0", "1.1", "1.7", "1.9999999999999999999999999999"])
+def test_accepts_compatible_minor_versions_without_rewriting_models(version: str) -> None:
+    from offering_protocol.core import validate_value
+
+    document = {**OFFERING, "odp_version": version}
+    validate_value(document, "offering.schema.json", "Offering")
+    assert document["odp_version"] == version
+    assert parse_offering(json.dumps(document)).odp_version == version
+
+
+@pytest.mark.parametrize("version", ["2.0", "0.9", "1", "01.0", "1.01", "1.0.0", "1.0\n", None, 1])
+def test_rejects_incompatible_or_malformed_versions(version: object) -> None:
+    with pytest.raises(OdpValidationError):
+        parse_offering(amend(OFFERING, odp_version=version))
+
+
 def action(identifier: str) -> dict[str, Any]:
     return {
         "authentication": "not-required",
@@ -238,21 +254,14 @@ def test_refuses_a_repeated_bucket_value() -> None:
         )
 
 
-def test_reads_two_spellings_of_one_decimal_as_one_bucket_value() -> None:
-    """FLT-32: decimal equality is numeric rather than lexical.
-
-    So `1.0` and `1.00` name one value, and a group offering both hands a caller two counts for one
-    candidate with no way to choose between them.
-    """
+def test_keeps_distinct_strings_without_a_filter_definition() -> None:
     for values in (
         ({"value": "1.0", "count": 4}, {"value": "1.00", "count": 2}),
         ({"value": "0", "count": 4}, {"value": "0.0", "count": 2}),
         ({"value": "12", "count": 4}, {"value": "12.000", "count": 2}),
         ({"value": "-1.5", "count": 4}, {"value": "-1.50", "count": 2}),
     ):
-        assert_rejected_for(
-            _page(_group("weight", *values)), parse_offering_page, "unique-bucket-value"
-        )
+        assert parse_offering_page(_page(_group("sku", *values)))
 
 
 def test_keeps_bucket_values_that_differ_apart() -> None:
@@ -368,4 +377,5 @@ def test_compares_any_bucket_value_the_model_can_hold() -> None:
     assert _bucket_key([1, 2]) != _bucket_key([2, 1])
     assert _bucket_key(None) != _bucket_key("null")
     assert _bucket_key(True) != _bucket_key(1)
-    assert _bucket_key("1.0") == _bucket_key("1.00")
+    assert _bucket_key("1.0") != _bucket_key("1.00")
+    assert _bucket_key(9007199254740992) != _bucket_key(9007199254740993)

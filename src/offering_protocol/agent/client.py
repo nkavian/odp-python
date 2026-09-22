@@ -189,10 +189,7 @@ class ServiceClient:
         self, representation: Representation = Representation.TERSE, limit: int = 0
     ) -> Page[Collection]:
         body = await self._get_page(Operation.LIST_COLLECTIONS, None, representation, limit)
-        page = parse_collection_page(body)
-        for item in page.items:
-            parse_collection(_encode(item))
-        return page
+        return parse_collection_page(body)
 
     async def get_collection(self, identifier: str) -> Collection:
         body = await self._get_page(Operation.GET_COLLECTION, identifier, Representation.FULL, 0)
@@ -206,10 +203,7 @@ class ServiceClient:
         body = await self._post_search(
             Operation.SEARCH_COLLECTIONS, request.to_dict(), representation
         )
-        page = parse_collection_page(body)
-        for item in page.items:
-            parse_collection(_encode(item))
-        return page
+        return parse_collection_page(body)
 
     async def list_offerings(
         self, representation: Representation = Representation.TERSE, limit: int = 0
@@ -498,7 +492,11 @@ class ServiceClient:
                 conditional["if-none-match"] = cached.etag
             if cached.last_modified:
                 conditional["if-modified-since"] = cached.last_modified
+        visited: set[str] = set()
         for redirects in range(_MAXIMUM_REDIRECTS + 1):
+            if current in visited:
+                raise AgentError("ODP supporting document contains a redirect loop")
+            visited.add(current)
             try:
                 response = await self._supporting_transport.send(
                     HttpRequest("GET", current, {"accept": accept, **conditional})
@@ -511,9 +509,14 @@ class ServiceClient:
                 location = response.headers.get("location")
                 if location is None:
                     raise AgentError("ODP supporting document redirect omitted Location")
-                current = urljoin(current, location)
-                if not _is_https_url(current):
+                target_url = urljoin(current, location)
+                if not _is_https_url(target_url):
                     raise AgentError("ODP supporting document redirect must use HTTPS")
+                if derive_service_origin(target_url) != derive_service_origin(current):
+                    raise AgentError(
+                        "ODP supporting document redirect must remain on the same origin"
+                    )
+                current = target_url
                 continue
             if response.status == 304:
                 if cached is None:
@@ -610,13 +613,6 @@ def parse_offering_page(data: bytes | str) -> OfferingPage[Offering]:
 
 def parse_problem_response(data: bytes | str, status: int) -> ProblemDetails:
     return parse_problem_response_strict(_agent_body(data, "problem"), status)
-
-
-def _encode(value: object) -> bytes:
-    if not hasattr(value, "model_dump_json"):
-        raise TypeError("ODP model is not serializable")
-    encoded = value.model_dump_json(by_alias=True, exclude_unset=True)
-    return cast(str, encoded).encode()
 
 
 def _append_query(target: str, values: dict[str, str]) -> str:

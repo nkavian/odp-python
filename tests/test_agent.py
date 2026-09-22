@@ -27,7 +27,6 @@ from offering_protocol.agent.capabilities import (
 )
 from offering_protocol.agent.client import (
     _decode_json_object,
-    _encode,
     _expiration,
     _invoke_parser,
 )
@@ -665,8 +664,6 @@ async def test_agent_remaining_traversal_and_supporting_document_edges() -> None
     assert not (await client.list_collection_offerings("plants", limit=1)).items
     assert not await client.search_all_offerings(OfferingSearchRequest(query="plant"))
 
-    with pytest.raises(TypeError):
-        _encode({"not": "a model"})
     with pytest.raises(AgentError):
         _invoke_parser(lambda _: (_ for _ in ()).throw(ValueError("bad")), b"{}")
 

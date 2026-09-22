@@ -75,6 +75,30 @@ async def test_reads_a_conformant_record() -> None:
 
 
 @pytest.mark.asyncio
+async def test_normalizes_unknown_operations_before_model_decoding() -> None:
+    page = await read(
+        SERVICE,
+        amend(
+            operations=[
+                *BASELINE_OPERATIONS,
+                {"name": "future-operation", "authentication": "not-required"},
+            ]
+        ),
+    )
+    assert len(page.items) == 2
+    assert not page.issues
+    assert len(page.items[1].operations) == 2
+
+
+@pytest.mark.asyncio
+async def test_model_decode_failure_is_isolated_to_its_record() -> None:
+    page = await read(SERVICE, amend(website_url=None), SERVICE)
+    assert len(page.items) == 2
+    assert len(page.issues) == 1
+    assert page.issues[0].index == 1
+
+
+@pytest.mark.asyncio
 async def test_refuses_an_origin_that_is_not_a_canonical_https_origin() -> None:
     """IDN-01: a Service is identified by its canonical origin, so two spellings are not one."""
     for origin in (

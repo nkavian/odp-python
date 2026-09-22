@@ -341,9 +341,18 @@ its Actions can advertise enrollment, payment, and trust protocols, but ODP does
 credentials, invoke Actions, submit payments, or implement trust protocols. Applications compose
 the appropriate protocol clients around an Action resolved through ODP.
 
-`parse_service_document` is the strict current-version Service parser. Agent inspection and
+`parse_service_document` validates Service metadata against the supported ODP major version.
+Compatible minor versions such as `1.7` are accepted without rewriting the received version;
+SDK-generated documents use `1.0`. Agent inspection and
 Directory results filter unrecognized enrollment, payment, and trust descriptors while retaining
 strict validation for recognized descriptors.
+
+Individual Offering and Collection GETs default to full representations; list and search operations
+default to terse items. A Catalog receives the requested language in `CatalogRequest.language` and
+declares the language it actually returns on each resource. Static catalogs do not translate content.
+
+Refinement parsing detects duplicate JSON values without guessing the type of a string. Comparing
+decimal or date-time strings by their meaning requires the referenced Filter Definition.
 
 ## Errors and validation
 

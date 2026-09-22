@@ -33,6 +33,7 @@ from offering_protocol.agent.client import (
 )
 from offering_protocol.core import (
     CapabilityLink,
+    CollectionSearchRequest,
     FilterCapabilitySource,
     FilterDefinition,
     FilterOperator,
@@ -534,3 +535,75 @@ def test_refuses_a_supporting_document_nested_past_the_parser(
 
     with pytest.raises(AgentError, match="nested too deeply"):
         _decode_json_object(b"[[[]]]")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("search", [False, True])
+async def test_collection_page_inherits_version_without_requiring_it_on_items(search: bool) -> None:
+    document = json.loads(SERVICE_DOCUMENT)
+    operation = "search-collections" if search else "list-collections"
+    document["operations"].append({"name": operation, "authentication": "not-required"})
+    transport = QueueTransport(
+        response(json.dumps(document)),
+        response('{"odp_version":"1.7","items":[{"id":"plants","name":"Plants"}]}'),
+    )
+    client = ServiceClient("https://store.example", transport=transport)
+    page = (
+        await client.search_collections(CollectionSearchRequest())
+        if search
+        else await client.list_collections()
+    )
+    assert page.odp_version == "1.7"
+    assert page.items[0].id == "plants"
+    assert "odp_version" not in page.items[0].model_fields_set
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "location",
+    [
+        "https://other.example/schema.json",
+        "https://schemas.example:444/schema.json",
+        "/schema.json",
+    ],
+)
+async def test_supporting_redirects_refuse_origin_changes_and_loops(location: str) -> None:
+    offering = {
+        "odp_version": "1.0",
+        "id": "item",
+        "name": "Item",
+        "schema": {"url": "https://schemas.example/schema.json"},
+        "attributes": {"colour": "green"},
+    }
+    supporting = QueueTransport(response("", status=302, headers={"location": location}))
+    client = ServiceClient(
+        "https://store.example",
+        transport=QueueTransport(response(SERVICE_DOCUMENT), response(json.dumps(offering))),
+        supporting_transport=supporting,
+    )
+    details = await client.get_offering_details("item")
+    assert len(supporting.requests) == 1
+    assert len(details.issues) == 1
+    assert "redirect" in details.issues[0].message
+    assert details.offering.name == "Item"
+    assert not details.offering.attributes
+
+
+@pytest.mark.asyncio
+async def test_supporting_redirects_allow_explicit_default_port() -> None:
+    supporting = QueueTransport(
+        response("", status=302, headers={"location": "https://schemas.example:443/final.json"}),
+        response("{}", content_type="application/json"),
+    )
+    client = ServiceClient("https://store.example", supporting_transport=supporting)
+    assert (
+        await client._supporting_json(
+            "https://schemas.example/start.json",
+            "schema",
+            "application/json",
+            {"application/json"},
+            100,
+        )
+        == {}
+    )
+    assert len(supporting.requests) == 2

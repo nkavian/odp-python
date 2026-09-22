@@ -69,8 +69,30 @@ async def call(method: str, path: str, **kwargs: object) -> Response:
     return await service().handle(Request(method=method, path=path, **kwargs))  # type: ignore[arg-type]
 
 
-async def localized(accept_language: str, path: str = "/.well-known/odp") -> Response:
-    return await service(localizations=TAGS).handle(
+async def localized(accept_language: str, path: str = "/odp/offerings") -> Response:
+    class TranslatedCatalog(StaticCatalog):
+        async def list_offerings(self, request: CatalogRequest) -> OfferingPage[Offering]:
+            page = await super().list_offerings(request)
+            return page.model_copy(
+                update={
+                    "items": [
+                        item.model_copy(
+                            update={
+                                "language": request.language,
+                                "name": f"Plant ({request.language})",
+                            }
+                        )
+                        for item in page.items
+                    ]
+                }
+            )
+
+    built = (
+        ServiceBuilder("Plants", "A plant store.", "en", "/odp")
+        .localizations(TAGS)
+        .build(TranslatedCatalog(StaticCatalogOptions(offerings=(_offering("p0"),))))
+    )
+    return await built.handle(
         Request(method="GET", path=path, headers={"accept-language": accept_language})
     )
 
@@ -83,6 +105,86 @@ EVERY_PATH = (
     "/odp/collections/plants",
     "/odp/collections/plants/offerings",
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "accept",
+    ["*/*, application/odp+json;q=0", "application/odp+json;q=0, */*", "application/*;q=0, */*"],
+)
+async def test_specific_media_exclusion_overrides_wildcard(accept: str) -> None:
+    result = await service().handle(Request("GET", "/.well-known/odp", headers={"accept": accept}))
+    assert result.status == 406
+
+
+@pytest.mark.asyncio
+async def test_explicit_media_acceptance_overrides_wildcard_refusal() -> None:
+    result = await service().handle(
+        Request(
+            "GET", "/.well-known/odp", headers={"accept": "application/*;q=0, application/odp+json"}
+        )
+    )
+    assert result.status == 200
+
+
+@pytest.mark.asyncio
+async def test_repeated_media_ranges_use_highest_quality() -> None:
+    result = await service().handle(
+        Request(
+            "GET",
+            "/.well-known/odp",
+            headers={"accept": "application/odp+json;q=0, application/odp+json;q=1"},
+        )
+    )
+    assert result.status == 200
+
+
+@pytest.mark.asyncio
+async def test_static_metadata_is_not_relabelled_as_a_translation() -> None:
+    for path in EVERY_PATH:
+        built = service(localizations=TAGS)
+        english = await built.handle(Request("GET", path, headers={"accept-language": "en"}))
+        french = await built.handle(Request("GET", path, headers={"accept-language": "fr"}))
+        assert french.headers["content-language"] == "en"
+        assert english.body == french.body
+        assert english.headers["etag"] == french.headers["etag"]
+
+
+@pytest.mark.asyncio
+async def test_individual_gets_default_to_full_and_lists_to_terse() -> None:
+    seen: list[CatalogRequest] = []
+
+    class RecordingCatalog(StaticCatalog):
+        async def get_collection(
+            self, identifier: str, request: CatalogRequest
+        ) -> Collection | None:
+            seen.append(request)
+            return await super().get_collection(identifier, request)
+
+    built = ServiceBuilder("Plants", "Plants", "en", "/odp").build(
+        RecordingCatalog(
+            StaticCatalogOptions(
+                collections=(Collection(id="plants", name="Plants", odp_version="1.0"),)
+            )
+        )
+    )
+    await built.handle(Request("GET", "/odp/collections/plants"))
+    assert seen[0].representation.value == "full"
+    for path in ("/odp/offerings/p0", "/odp/collections/plants"):
+        built = service()
+        default = await built.handle(Request("GET", path))
+        full = await built.handle(Request("GET", path, query="representation=full"))
+        assert default.status == full.status == 200
+        assert default.body == full.body
+        terse = await built.handle(Request("GET", path, query="representation=terse"))
+        assert terse.status == 200
+        assert json.loads(terse.body)["odp_version"] == "1.0"
+    for path in ("/odp/offerings", "/odp/collections", "/odp/collections/plants/offerings"):
+        built = service()
+        default = await built.handle(Request("GET", path))
+        terse = await built.handle(Request("GET", path, query="representation=terse"))
+        assert default.status == terse.status == 200
+        assert default.body == terse.body
 
 
 # -- which variant it served ---------------------------------------------------
@@ -216,12 +318,16 @@ async def test_distinguishes_terse_from_full() -> None:
     built = ServiceBuilder("Plants", "A plant store.", "en", "/odp").build(
         StaticCatalog(StaticCatalogOptions(offerings=(actionable,)))
     )
-    terse = await built.handle(Request(method="GET", path="/odp/offerings/p0"))
+    terse = await built.handle(
+        Request(method="GET", path="/odp/offerings/p0", query="representation=terse")
+    )
     full = await built.handle(
         Request(method="GET", path="/odp/offerings/p0", query="representation=full")
     )
+    default = await built.handle(Request(method="GET", path="/odp/offerings/p0"))
 
     assert b"actions" not in terse.body
+    assert default.body == full.body
     assert b"actions" in full.body
     assert terse.headers["etag"] != full.headers["etag"]
 

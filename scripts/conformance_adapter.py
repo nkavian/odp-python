@@ -242,6 +242,9 @@ async def evaluate_errors_limits(case: dict[str, Any]) -> bool | None:
 
 
 async def evaluate_case(subject: str, case: dict[str, Any], role: str) -> bool | None:
+    if subject == "protocol-version":
+        document = {"odp_version": case["received"], "id": "item", "name": "Item"}
+        return succeeds(lambda: parse_offering(json.dumps(document))) == case["compatible"]
     if subject == "local-identifier":
         return is_local_resource_identifier(case["value"]) == case["valid"]
     if subject == "identity-comparison":

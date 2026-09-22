@@ -281,7 +281,7 @@ class Service:
             self._document.language,
             list(self._document.localizations),
         )
-        exchange = _Exchange(headers=headers, language=language, method=method)
+        exchange = _Exchange(headers=headers, language=self._document.language, method=method)
         if request.path == "/.well-known/odp":
             _require_method(effective, ("GET",))
             return _json_response(self._document, _MAXIMUM_DOCUMENT_BYTES, exchange)
@@ -295,7 +295,7 @@ class Service:
             item.name for item in self._document.operations
         }:
             raise RequestError(404, "NOT_FOUND", "ODP operation is not supported")
-        catalog_request = _catalog_request(request, headers, language)
+        catalog_request = _catalog_request(request, headers, language, operation)
         if (effective, path) == ("GET", "/offerings"):
             offering_page = await self._catalog.list_offerings(catalog_request)
             return _json_response(
@@ -370,7 +370,9 @@ class Service:
         raise RequestError(404, "NOT_FOUND", "ODP resource not found")
 
 
-def _catalog_request(request: Request, headers: dict[str, str], language: str) -> CatalogRequest:
+def _catalog_request(
+    request: Request, headers: dict[str, str], language: str, operation: Operation | None
+) -> CatalogRequest:
     parameters = parse_qsl(request.query, keep_blank_values=True)
     # SVC-73: a repeated `representation` is rejected rather than resolved. Collapsing repeats into
     # a dict silently honoured whichever copy came last, so `representation=terse&representation=
@@ -381,7 +383,10 @@ def _catalog_request(request: Request, headers: dict[str, str], language: str) -
             raise RequestError(400, "INVALID_REQUEST", f"{name} must not be repeated")
         values[name] = value
     try:
-        representation = Representation(values.get("representation", "terse"))
+        default = (
+            "full" if operation in {Operation.GET_COLLECTION, Operation.GET_OFFERING} else "terse"
+        )
+        representation = Representation(values.get("representation", default))
         limit = int(values.get("limit", "0"))
     except ValueError as error:
         raise RequestError(400, "INVALID_REQUEST", "query parameter is invalid") from error
@@ -434,9 +439,20 @@ def _json_response(value: object, maximum_bytes: int, exchange: _Exchange) -> Re
     body = _encode(value)
     if len(body) > maximum_bytes:
         raise ServiceError("response body is too large")
-    etag = _entity_tag(exchange.language, body)
+    if isinstance(value, Page):
+        language = (
+            ", ".join(
+                dict.fromkeys(
+                    getattr(item, "language", "") or exchange.language for item in value.items
+                )
+            )
+            or exchange.language
+        )
+    else:
+        language = getattr(value, "language", "") or exchange.language
+    etag = _entity_tag(language, body)
     headers = {
-        "content-language": exchange.language,
+        "content-language": language,
         "content-type": MEDIA_TYPE,
         "etag": etag,
         "vary": "Accept, Accept-Language",
@@ -554,12 +570,20 @@ def _require_accept(value: str | None) -> None:
     """
     if value is None:
         return
+    specificity = -1
+    quality = 0.0
     for entry in value.split(","):
         media_type = entry.split(";", 1)[0].strip().lower()
         if media_type not in {"*/*", "application/*", MEDIA_TYPE}:
             continue
-        if _quality_of(entry) > 0:
-            return
+        precision = {"*/*": 0, "application/*": 1, MEDIA_TYPE: 2}[media_type]
+        weight = _quality_of(entry)
+        if precision > specificity:
+            specificity, quality = precision, weight
+        elif precision == specificity:
+            quality = max(quality, weight)
+    if quality > 0:
+        return
     raise RequestError(406, "NOT_ACCEPTABLE", f"Accept must allow {MEDIA_TYPE}")
 
 

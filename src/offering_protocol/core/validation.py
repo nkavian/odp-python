@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from decimal import Decimal
 from functools import lru_cache
 from importlib.resources import files
 from typing import Any, TypeVar
@@ -17,6 +18,7 @@ from pydantic import ValidationError as ModelValidationError
 from referencing import Registry, Resource
 
 from offering_protocol.core.models import (
+    VERSION,
     Collection,
     CollectionSearchRequest,
     FilterDefinition,
@@ -715,7 +717,13 @@ def validate_value(value: object, schema_name: str, document_type: str) -> None:
     validator = _validators().get(schema_name)
     if validator is None:
         raise RuntimeError(f"missing bundled schema {schema_name}")
-    issues = [_schema_issue(error) for error in validator.iter_errors(value)]
+    validation_value = value
+    if isinstance(value, dict):
+        version = value.get("odp_version")
+        if isinstance(version, str) and re.fullmatch(r"1\.(0|[1-9][0-9]*)", version):
+            # The bundled schemas describe 1.0; compatible minor versions use the same rules.
+            validation_value = {**value, "odp_version": VERSION}
+    issues = [_schema_issue(error) for error in validator.iter_errors(validation_value)]
     if issues:
         issues.sort(key=lambda issue: (issue.path, issue.keyword, issue.message))
         raise OdpValidationError(document_type, issues)
@@ -889,9 +897,6 @@ def _is_language_tag(value: str) -> bool:
     return not in_extension or len(subtags[-1]) > 1
 
 
-_DECIMAL = re.compile(r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$")
-
-
 def _compare_decimals(left: str, right: str) -> int:
     """Orders two ODP monetary values, which are decimal strings rather than JSON numbers (OFR-48).
 
@@ -916,25 +921,15 @@ def _split_decimal(value: str) -> tuple[str, str]:
     return whole.lstrip("0"), fraction.rstrip("0")
 
 
-def _bucket_key(value: object) -> str:
-    """Compares two bucket values the way the referenced Filter Definition would.
-
-    A response does not carry its Filter Definitions, so the type behind a JSON string -- `string`,
-    `decimal`, `date` or `date-time` -- is not known here. Every one of those compares two strings
-    exactly except `decimal`, whose equality is numeric, so a string that can only be a decimal is
-    reduced to one spelling per value. JSON numbers compare numerically.
-    """
+def _bucket_key(value: object) -> tuple[str, object]:
+    """Check structural duplicates without guessing the type of a string-valued Filter."""
     if isinstance(value, bool):
-        return f"b{value}"
+        return "boolean", value
     if isinstance(value, int | float):
-        return f"n{float(value)}"
+        return "number", Decimal(str(value))
     if isinstance(value, str):
-        if _DECIMAL.match(value):
-            whole, fraction = _split_decimal(value.removeprefix("-"))
-            sign = "-" if value.startswith("-") and (whole or fraction) else ""
-            return f"d{sign}{whole}.{fraction}"
-        return f"s{value}"
-    return f"o{json.dumps(value, separators=(',', ':'), sort_keys=True)}"
+        return "string", value
+    return "other", json.dumps(value, separators=(",", ":"), sort_keys=True)
 
 
 def _agent_body(data: bytes | str, kind: str) -> str:
