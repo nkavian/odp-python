@@ -27,7 +27,6 @@ from offering_protocol.agent.capabilities import (
 )
 from offering_protocol.agent.client import (
     _decode_json_object,
-    _encode,
     _expiration,
     _invoke_parser,
 )
@@ -277,21 +276,24 @@ async def test_builds_agent_friendly_offering_details_without_invoking_action() 
     transport = QueueTransport(
         response(SERVICE_DOCUMENT),
         response(ACTION_OFFERING),
-        response(schema, content_type="application/schema+json"),
     )
+    supporting = QueueTransport(response(schema, content_type="application/schema+json"))
     details = await ServiceClient(
-        "https://demo.inflowpay.ai", transport=transport
+        "https://demo.inflowpay.ai", transport=transport, supporting_transport=supporting
     ).get_offering_details("rubber-plant")
     assert details.actions[0].http is not None
     assert details.actions[0].http.url == "https://demo.inflowpay.ai/actions/purchase"
     assert details.attribute_schema is not None
-    assert len(transport.requests) == 3
+    assert len(transport.requests) == 2
+    assert len(supporting.requests) == 1
+    assert [request.maximum_response_bytes for request in transport.requests] == [65_536, 524_288]
+    assert supporting.requests[0].maximum_response_bytes == 262_144
 
 
 DIRECTORY_PAGE = """{
   "items":[{
     "description":"Plants","indexed_at":"2026-08-25T00:00:00Z","language":"en",
-    "localizations":["en"],"name":"One","operations":[],
+    "localizations":["en"],"name":"One","operations":[{"authentication":"not-required","name":"get-offering"},{"authentication":"not-required","name":"list-offerings"}],
     "service_origin":"https://one.example"
   }]
 }"""
@@ -448,6 +450,8 @@ async def test_resolves_http_action_request_schema() -> None:
         transport=QueueTransport(
             response(SERVICE_DOCUMENT),
             response(offering),
+        ),
+        supporting_transport=QueueTransport(
             response(schema, content_type="application/schema+json"),
             response(schema, content_type="application/schema+json"),
             response(schema, content_type="application/schema+json"),
@@ -477,22 +481,26 @@ async def test_resolves_openapi_action_and_rejects_invalid_openapi() -> None:
       "openapi":"3.1.0","paths":{"/purchase":{"post":{
       "operationId":"purchasePlant","responses":{}}}}
     }"""
+    supporting = QueueTransport(response(openapi, content_type="application/json"))
     client = ServiceClient(
         "https://demo.inflowpay.ai",
         transport=QueueTransport(
             response(document),
             response(offering),
-            response(openapi, content_type="application/json"),
         ),
+        supporting_transport=supporting,
     )
     resolved = await client.resolve_action("plant", "purchase")
     assert resolved.operation == {"operationId": "purchasePlant", "responses": {}}
+    assert supporting.requests[0].maximum_response_bytes == 1_048_576
 
     invalid_client = ServiceClient(
         "https://demo.inflowpay.ai",
         transport=QueueTransport(
             response(document),
             response(offering),
+        ),
+        supporting_transport=QueueTransport(
             response('{"openapi":"3.0.0"}', content_type="application/json"),
         ),
     )
@@ -523,6 +531,8 @@ async def test_offering_details_report_unusable_actions_and_attributes() -> None
         transport=QueueTransport(
             response(SERVICE_DOCUMENT),
             response(offering),
+        ),
+        supporting_transport=QueueTransport(
             response(schema, content_type="application/schema+json"),
         ),
     )
@@ -565,7 +575,7 @@ async def test_supporting_document_security_and_cache_edges() -> None:
     revalidating = ServiceClient(
         "https://demo.inflowpay.ai",
         cache=cache,
-        transport=QueueTransport(response(b"", status=304)),
+        supporting_transport=QueueTransport(response(b"", status=304)),
     )
     assert await revalidating._supporting_json(
         "https://schemas.example/a", "schema", "application/json", {"application/json"}, 100
@@ -595,7 +605,7 @@ async def test_capability_limits_duplicates_and_pagination_edges(
         CapabilityScope.SERVICE,
         SearchCapabilities(filters=FilterCapabilitySource(inline=[definition])),
     )
-    assert "exceed 1024" in result.issues[-1].message
+    assert "Effective filters exceed their limit" in result.issues[-1].message
 
     sort = SortDefinition(
         description="Price",
@@ -620,8 +630,11 @@ async def test_capability_limits_duplicates_and_pagination_edges(
         CapabilityScope.COLLECTION,
         SearchCapabilities(sorts=SortCapabilitySource(inline=[sort, sort])),
     )
-    assert not target and not scopes
-    assert "Duplicate sorts" in result.issues[-1].message
+    # FLT-55: `[sort, sort]` repeats an identifier within one source, so that source is
+    # discarded whole and the sort merged from the earlier source is left exactly as it was.
+    assert target == {"price": sort}
+    assert scopes == {"price": CapabilityScope.SERVICE}
+    assert "within one source" in result.issues[-1].message
 
     with pytest.raises(AgentError):
         _resolve_reference("data:text/plain,x", client.service_origin)
@@ -662,8 +675,6 @@ async def test_agent_remaining_traversal_and_supporting_document_edges() -> None
     assert not (await client.list_collection_offerings("plants", limit=1)).items
     assert not await client.search_all_offerings(OfferingSearchRequest(query="plant"))
 
-    with pytest.raises(TypeError):
-        _encode({"not": "a model"})
     with pytest.raises(AgentError):
         _invoke_parser(lambda _: (_ for _ in ()).throw(ValueError("bad")), b"{}")
 
@@ -721,9 +732,8 @@ async def test_agent_remaining_traversal_and_supporting_document_edges() -> None
 async def test_action_resolution_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
     details = await ServiceClient(
         "https://demo.inflowpay.ai",
-        transport=QueueTransport(
-            response(SERVICE_DOCUMENT), response(ACTION_OFFERING), response(b"", status=500)
-        ),
+        transport=QueueTransport(response(SERVICE_DOCUMENT), response(ACTION_OFFERING)),
+        supporting_transport=QueueTransport(response(b"", status=500)),
     ).get_offering_details("rubber-plant")
     assert details.attribute_schema is None
     assert details.issues[0].scope.value == "attribute_schema"
@@ -798,6 +808,8 @@ async def test_action_resolution_boundaries(monkeypatch: pytest.MonkeyPatch) -> 
                 )
             ),
             response(offering),
+        ),
+        supporting_transport=QueueTransport(
             response(duplicate, content_type="application/json"),
         ),
     )
@@ -834,7 +846,7 @@ async def test_remaining_capability_and_cache_branches(monkeypatch: pytest.Monke
         CapabilityScope.SERVICE,
         SearchCapabilities(sorts=SortCapabilitySource(inline=[sort])),
     )
-    assert "exceed 128" in result.issues[-1].message
+    assert "Effective sorts exceed their limit" in result.issues[-1].message
 
     monkeypatch.setattr("offering_protocol.agent.capabilities._MAXIMUM_CAPABILITY_PAGES", 1)
     filter_limit = ServiceClient(
@@ -899,6 +911,7 @@ async def test_remaining_capability_and_cache_branches(monkeypatch: pytest.Monke
     conditional = ServiceClient(
         "https://demo.inflowpay.ai",
         cache=cache,
+        cache_partition="anonymous",
         transport=conditional_transport,
     )
     assert (await conditional.inspect()).freshness is Freshness.REVALIDATED

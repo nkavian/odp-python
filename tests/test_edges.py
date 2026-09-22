@@ -19,7 +19,6 @@ from offering_protocol.agent.client import (
     _cacheable,
     _expiration,
     _has_freshness,
-    _normalize_body,
     _operation_parser,
 )
 from offering_protocol.agent.client import (
@@ -53,7 +52,12 @@ from offering_protocol.core import (
 )
 from offering_protocol.core import __all__ as core_exports
 from offering_protocol.core.references import ReferenceError
-from offering_protocol.core.validation import OdpValidationError, _is_language_tag, _parse
+from offering_protocol.core.validation import (
+    OdpValidationError,
+    _agent_body,
+    _is_language_tag,
+    _parse,
+)
 from offering_protocol.directory import (
     DirectoryClient,
     DirectoryError,
@@ -74,6 +78,7 @@ from offering_protocol.service import (
 )
 from offering_protocol.service.service import (
     _encode,
+    _Exchange,
     _json_response,
     _validate_collection_representation,
     _validate_offering_representation,
@@ -185,7 +190,7 @@ async def test_directory_response_edge_cases_and_real_transport_adapter(
     service = (
         '{"description":"Plants","indexed_at":"2026-01-01T00:00:00Z",'
         '"language":"en","localizations":["en"],"name":"Plant",'
-        '"operations":[],"service_origin":"https://plants.example"}'
+        '"operations":[{"authentication":"not-required","name":"get-offering"},{"authentication":"not-required","name":"list-offerings"}],"service_origin":"https://plants.example"}'
     )
     with pytest.raises(DirectoryError):
         await DirectoryClient(
@@ -196,17 +201,19 @@ async def test_directory_response_edge_cases_and_real_transport_adapter(
                 )
             )
         ).search_services(SearchRequest())
-    with pytest.raises(DirectoryError):
-        await DirectoryClient(
-            transport=QueueTransport(
-                response(
-                    '{"items":['
-                    + service.replace("https://plants.example", "https://PLANTS.example")
-                    + "]}",
-                    content_type="application/json",
-                )
+    # A non-canonical origin makes that record unusable, not the page.
+    non_canonical = await DirectoryClient(
+        transport=QueueTransport(
+            response(
+                '{"items":['
+                + service.replace("https://plants.example", "https://PLANTS.example")
+                + "]}",
+                content_type="application/json",
             )
-        ).search_services(SearchRequest())
+        )
+    ).search_services(SearchRequest())
+    assert not non_canonical.items
+    assert "canonical" in non_canonical.issues[0].message
 
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.host == "93.184.216.34"
@@ -297,7 +304,7 @@ async def test_service_builder_optional_metadata_and_catalog_failures() -> None:
         await catalog.list_collection_offerings("missing", CatalogRequest())
     assert _encode({"answer": 42}) == b'{"answer":42}'
     with pytest.raises(ServiceError):
-        _json_response(200, "x" * 10, 1)
+        _json_response("x" * 10, 1, _Exchange(headers={}, language="en", method="GET"))
 
 
 @pytest.mark.asyncio
@@ -341,9 +348,12 @@ async def test_agent_collection_search_and_cache_header_edges() -> None:
         {"cache-control": "max-age=10", "age": "3"}, timedelta(), now
     ) == now + timedelta(seconds=7)
     assert _expiration({"expires": "Wed, 21 Oct 2037 07:28:00 GMT"}, timedelta(), now).year == 2037
-    assert _expiration({"expires": "bad"}, timedelta(seconds=2), now) == now + timedelta(seconds=2)
+    # RFC 9111 5.3: an `Expires` the cache cannot read names a time in the past.
+    assert _expiration({"expires": "bad"}, timedelta(seconds=2), now) == now
     assert _operation_parser(Operation.GET_COLLECTION) is parse_agent_collection
-    assert _normalize_body(b"[]", "collection") == "[]"
+    # A body that is not a JSON object has no members to filter, so it reaches the schema as it
+    # stands and is refused there rather than during normalization.
+    assert _agent_body(b"[]", "collection") == "[]"
 
 
 @pytest.mark.asyncio

@@ -8,18 +8,26 @@ log_file=${TMPDIR:-/tmp}/odp-node-interop.log
 
 package_manager=$(node -p 'require(require("node:path").resolve(process.argv[1])).packageManager' "$node_dir/package.json")
 corepack "$package_manager" --dir "$node_dir" build
-HOST=127.0.0.1 PORT="$port" node "$node_dir/examples/odp-service-small/dist/index.js" >"$log_file" 2>&1 &
-service_pid=$!
-trap 'kill "$service_pid" 2>/dev/null || true' EXIT INT TERM
+run_example() {
+  HOST=127.0.0.1 PORT="$port" node "$node_dir/examples/$1/dist/index.js" >"$log_file" 2>&1 &
+  service_pid=$!
+  trap 'kill "$service_pid" 2>/dev/null || true' EXIT INT TERM
 
-attempt=0
-until curl --fail --silent --output /dev/null "$service_url/.well-known/odp"; do
-  attempt=$((attempt + 1))
-  if [ "$attempt" -ge 50 ]; then
-    sed -n '1,120p' "$log_file" >&2
-    exit 1
-  fi
-  sleep 0.1
-done
+  attempt=0
+  until curl --fail --silent --output /dev/null "$service_url/.well-known/odp"; do
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 50 ]; then
+      sed -n '1,120p' "$log_file" >&2
+      exit 1
+    fi
+    sleep 0.1
+  done
 
-uv run python scripts/node_interoperability.py "$service_url"
+  uv run python scripts/node_interoperability.py "$service_url" "$2"
+  kill "$service_pid"
+  wait "$service_pid" 2>/dev/null || true
+  trap - EXIT INT TERM
+}
+
+run_example odp-service-small catalog
+run_example odp-service-marketplace search

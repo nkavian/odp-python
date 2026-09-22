@@ -48,6 +48,7 @@ class StaticCatalog:
         except ValueError as error:
             raise CatalogError(f"Static Catalog contains an invalid resource: {error}") from error
         self._collection_by_id = _unique(self._collections, "Collection")
+        _validate_hierarchy(self._collection_by_id)
         self._offering_by_id = _unique(self._offerings, "Offering")
         for offering in self._offerings:
             if any(
@@ -112,6 +113,33 @@ class StaticCatalog:
 
 
 Resource = TypeVar("Resource", Collection, Offering)
+
+
+def _validate_hierarchy(collections: dict[str, Collection]) -> None:
+    depths: dict[str, int] = {}
+    visiting: set[str] = set()
+
+    def depth(identifier: str) -> int:
+        if identifier in depths:
+            return depths[identifier]
+        if identifier not in collections:
+            raise CatalogError(f"Collection parent {identifier} does not exist")
+        if identifier in visiting:
+            raise CatalogError("Collection hierarchy contains a cycle")
+        if len(visiting) > 32:
+            raise CatalogError("Collection hierarchy exceeds 32 edges")
+        visiting.add(identifier)
+        result = max(
+            (depth(parent) + 1 for parent in collections[identifier].parent_ids), default=0
+        )
+        visiting.remove(identifier)
+        if result > 32:
+            raise CatalogError("Collection hierarchy exceeds 32 edges")
+        depths[identifier] = result
+        return result
+
+    for identifier in collections:
+        depth(identifier)
 
 
 def _unique(values: tuple[Resource, ...], label: str) -> dict[str, Resource]:
@@ -205,8 +233,12 @@ def _represent_collection(value: Collection, request: CatalogRequest, embedded: 
 def _encode_cursor(
     request: CatalogRequest, limit: int, offset: int, continuation_key: bytes
 ) -> str:
+    # The cursor carries everything that decided what this page contained, so a continuation
+    # cannot quietly change variant part-way through a sequence -- including the language, because
+    # a page served in French is a different page from the same offsets served in English.
     value = {
         "expires": int(time.time()) + _CONTINUATION_LIFETIME_SECONDS,
+        "language": request.language,
         "limit": limit,
         "offset": offset,
         "path": request.path,
@@ -243,6 +275,7 @@ def _decode_cursor(request: CatalogRequest, limit: int, continuation_key: bytes)
         if (
             not isinstance(value, dict)
             or value.get("expires", 0) < int(time.time())
+            or value.get("language") != request.language
             or value.get("limit") != limit
             or value.get("path") != request.path
             or value.get("representation") != request.representation.value

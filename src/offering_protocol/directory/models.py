@@ -142,9 +142,23 @@ class Facets(OdpModel):
     trust: list[Facet[TrustProtocol]] = Field(default_factory=list)
 
 
+class ServiceIssue(OdpModel):
+    """A record the Directory published that this client would not hand back.
+
+    ROLE-03: a Directory result is discovery metadata rather than authoritative Service data, so
+    one unusable record is a note about that record, not a reason to withhold every other Service
+    on the page.
+    """
+
+    index: int
+    message: str
+
+
 class SearchPage(OdpModel):
     facets: Facets | None = None
+    #: The records this client was able to read. Withheld records appear in `issues`.
     items: list[DirectoryService]
+    issues: list[ServiceIssue] = Field(default_factory=list)
     next: str = ""
 
 

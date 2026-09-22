@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import json
-from urllib.parse import urlencode, urljoin
+import re
+from ipaddress import ip_address
+from urllib.parse import urlencode, urljoin, urlsplit
 
 from pydantic import ValidationError as ModelValidationError
 
 from offering_protocol.core import (
     OdpValidationError,
+    ReferenceError,
+    ServiceDocument,
     derive_service_origin,
     parse_agent_service_document,
 )
+from offering_protocol.directory.addresses import is_public
 from offering_protocol.directory.models import (
     DirectoryService,
     Environment,
@@ -20,6 +25,7 @@ from offering_protocol.directory.models import (
     SearchPage,
     SearchRequest,
     SearchResponse,
+    ServiceIssue,
     SuggestionRequest,
 )
 from offering_protocol.directory.results import parse_search_response
@@ -32,6 +38,10 @@ from offering_protocol.directory.transport import (
 
 _MAXIMUM_REDIRECTS = 5
 _MAXIMUM_RESPONSE_BYTES = 524_288
+_MAXIMUM_ERROR_CHARACTERS = 2_048
+_RFC_3339 = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$"
+)
 
 
 class DirectoryError(RuntimeError):
@@ -98,7 +108,9 @@ class DirectoryClient:
         if not next_reference.strip():
             raise DirectoryError("Directory continuation is empty")
         target = urljoin(f"{self.environment.origin}/", next_reference)
-        if derive_service_origin(target) != self.environment.origin:
+        # The continuation was written by the Directory, so a reference that is not a URL at all is
+        # a Directory failure to report rather than an exception from the URL parser.
+        if _origin_of(target, "Directory continuation") != self.environment.origin:
             raise DirectoryError("Directory continuation changed canonical origin")
         return target
 
@@ -192,7 +204,7 @@ class DirectoryClient:
             if location is None:
                 raise DirectoryError("Directory redirect omitted Location")
             next_target = urljoin(target, location)
-            if derive_service_origin(next_target) != derive_service_origin(target):
+            if _origin_of(next_target, "Directory redirect") != _origin_of(target, "Directory"):
                 raise DirectoryError("Directory redirect changed origin")
             if response.status == 303 or (response.status in {301, 302} and method == "POST"):
                 method = "GET"
@@ -209,54 +221,111 @@ def _parse_mixed_response(body: bytes) -> SearchResponse:
 
 
 def _parse_search_page(body: bytes) -> SearchPage:
+    """Reads a Directory search page, keeping every record this client can read.
+
+    ROLE-03: a Directory is a discovery aid, not an authority. One stale or nonconformant record
+    used to reject the page, which made every other Service in the result undiscoverable; it is now
+    dropped into `issues` and the rest of the page is handed back.
+    """
     try:
         raw = json.loads(body)
-        if isinstance(raw, dict) and isinstance(raw.get("items"), list):
-            for item in raw["items"]:
-                if isinstance(item, dict) and "protocols" in item:
-                    _normalize_service_protocols(item)
-        page = SearchPage.model_validate(raw)
-    except (
-        UnicodeDecodeError,
-        json.JSONDecodeError,
-        ModelValidationError,
-        OdpValidationError,
-    ) as error:
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise DirectoryError(f"invalid Directory response: {error}") from error
-    if len(page.items) > 100:
+    if not isinstance(raw, dict) or not isinstance(raw.get("items"), list):
+        raise DirectoryError("invalid Directory response: search page has no items")
+    if len(raw["items"]) > 100:
         raise DirectoryError("Directory search page exceeds 100 Services")
+    items: list[DirectoryService] = []
+    issues: list[ServiceIssue] = []
+    for index, entry in enumerate(raw["items"]):
+        try:
+            items.append(DirectoryService.model_validate(_read_service(entry)))
+        except (ModelValidationError, OdpValidationError, ReferenceError, DirectoryError) as error:
+            issues.append(ServiceIssue(index=index, message=str(error)))
+    try:
+        page = SearchPage.model_validate({**raw, "items": items})
+    except (ModelValidationError, OdpValidationError) as error:
+        raise DirectoryError(f"invalid Directory response: {error}") from error
     if page.facets is not None and any(
         facet.value.name.value != "tap" for facet in page.facets.trust
     ):
         raise DirectoryError("Directory trust facets are invalid")
-    for service in page.items:
-        if derive_service_origin(service.service_origin) != service.service_origin:
-            raise DirectoryError("Directory Service origin is not canonical")
-    return page
+    return page.model_copy(update={"issues": issues})
 
 
-def _normalize_service_protocols(item: dict[str, object]) -> None:
-    candidate = {
-        "description": "Directory protocol validation",
-        "http": {"endpoint_base": "/"},
-        "language": "en",
-        "localizations": ["en"],
-        "name": "Directory Service",
-        "odp_version": "1.0",
-        "operations": [
-            {"authentication": "not-required", "name": "get-offering"},
-            {"authentication": "not-required", "name": "list-offerings"},
-        ],
-        "protocols": item["protocols"],
-    }
-    document = parse_agent_service_document(json.dumps(candidate, separators=(",", ":")))
-    if document.protocols is None:
-        item.pop("protocols")
-    else:
+def _read_service(entry: object) -> dict[str, object]:
+    """Validates one Directory record, or raises describing why it cannot be used.
+
+    A Directory result echoes Service Document members, so those members are held to the Service
+    Document's own rules rather than merely to their JSON types -- a Directory that published
+    `"language": "not a tag"` would otherwise hand a caller a tag no language matcher can read.
+    """
+    if not isinstance(entry, dict):
+        raise DirectoryError("Directory Service result is not an object")
+    item = dict(entry)
+    origin = item.get("service_origin")
+    if not isinstance(origin, str) or _origin_of(origin, "Directory Service origin") != origin:
+        raise DirectoryError("Directory Service origin is not a canonical HTTPS origin")
+    _require_public_origin(origin)
+    indexed_at = item.get("indexed_at")
+    # A value `datetime.fromisoformat` happens to accept is not an RFC 3339 timestamp, and a caller
+    # that compares or slices `indexed_at` needs the one shape.
+    if not isinstance(indexed_at, str) or not _RFC_3339.match(indexed_at):
+        raise DirectoryError("indexed_at must be an RFC 3339 date-time")
+    document = _validate_as_service_document(item)
+    # `protocols` is reinstated from the validated document only when something survived agent
+    # filtering, so a block naming nothing this ODP version knows does not pass straight through.
+    item.pop("protocols", None)
+    if document.protocols is not None:
         item["protocols"] = document.protocols.model_dump(mode="json", exclude_defaults=True)
+    item["operations"] = [operation.model_dump(mode="json") for operation in document.operations]
+    return item
+
+
+def _validate_as_service_document(item: dict[str, object]) -> ServiceDocument:
+    """Holds the Service Document members a record echoes to the Service Document's own rules."""
+    candidate: dict[str, object] = {
+        "http": {"endpoint_base": "/"},
+        "odp_version": "1.0",
+        "operations": item.get("operations"),
+    }
+    for member in ("description", "keywords", "language", "localizations", "name", "protocols"):
+        if member in item:
+            candidate[member] = item[member]
+    for member in ("documentation_url", "status_url", "support_url", "website_url"):
+        value = item.get(member)
+        if value not in (None, ""):
+            candidate[member] = value
+    return parse_agent_service_document(json.dumps(candidate, separators=(",", ":")))
+
+
+def _require_public_origin(origin: str) -> None:
+    """A public Directory has no business pointing an Agent at a loopback or private host.
+
+    The default transport refuses these too, but that guarantee should not depend on which
+    transport the consumer installed, nor on whether they enabled local development for a Service
+    of their own.
+    """
+    host = urlsplit(origin).hostname or ""
+    try:
+        address = ip_address(host)
+    except ValueError:
+        return
+    if not is_public(address):
+        raise DirectoryError("Directory Service origin must not be a private or loopback host")
+
+
+def _origin_of(value: str, subject: str) -> str:
+    """Derives a Service Origin, reporting a reference that is not one as a Directory failure."""
+    try:
+        return derive_service_origin(value)
+    except ReferenceError as error:
+        raise DirectoryError(f"{subject} is not a usable origin: {error}") from error
 
 
 def _validate_search_request(request: SearchRequest) -> None:
+    # 0 means "the Directory decides"; anything else is a count, and a count below one asks for
+    # nothing while still being sent on the wire.
     if request.limit < 0 or request.limit > 100:
         raise DirectoryError("limit must be from 1 through 100")
     if request.query.strip() != request.query or len(request.query) > 512:
@@ -277,14 +346,17 @@ def _validate_search_request(request: SearchRequest) -> None:
 
 
 def _consume_response(response: HttpResponse) -> HttpResponse:
-    if len(response.body) > _MAXIMUM_RESPONSE_BYTES:
-        raise DirectoryError("Directory response exceeds 524288 bytes")
     if not 200 <= response.status < 300:
+        # The status is what describes the failure. Reading the size first turned a refused request
+        # into a size complaint, and passing the whole body on made the error message as large as
+        # the response the Directory sent.
         raise DirectoryRequestError(
             response.status,
-            response.body.decode(errors="replace"),
+            response.body.decode(errors="replace")[:_MAXIMUM_ERROR_CHARACTERS],
             response.headers,
         )
+    if len(response.body) > _MAXIMUM_RESPONSE_BYTES:
+        raise DirectoryError("Directory response exceeds 524288 bytes")
     content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     if content_type != "application/json":
         raise DirectoryError("Directory response must use application/json")

@@ -32,7 +32,10 @@ DIRECTORY_PAGE = """{
     "language":"en",
     "localizations":["en"],
     "name":"Indica Flowers",
-    "operations":[],
+    "operations":[
+      {"authentication":"not-required","name":"get-offering"},
+      {"authentication":"not-required","name":"list-offerings"}
+    ],
     "service_origin":"https://demo.inflowpay.ai"
   }]
 }"""
@@ -120,11 +123,15 @@ async def test_search_filters_unknown_protocols_and_rejects_malformed_known() ->
     ).search_services(SearchRequest())
     assert page.items[0].protocols is None
 
+    # ROLE-03: a descriptor bearing a recognized name stays subject to every rule for that
+    # descriptor, so this record is unusable -- but it is dropped and reported, not raised, because
+    # a Directory is a discovery aid and the other Services on the page remain findable.
     malformed = candidate.replace('"name":"mpp"', '"name":"mpp","extra":true')
-    with pytest.raises(DirectoryError):
-        await DirectoryClient(
-            transport=QueueTransport(response(malformed, content_type="application/json"))
-        ).search_services(SearchRequest())
+    page = await DirectoryClient(
+        transport=QueueTransport(response(malformed, content_type="application/json"))
+    ).search_services(SearchRequest())
+    assert not page.items
+    assert page.issues[0].index == 0
 
 
 @pytest.mark.asyncio

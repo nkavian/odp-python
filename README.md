@@ -203,9 +203,14 @@ The Agent module also provides:
 - Conditional request and representation caching with injectable `Cache` and `Transport` protocols.
 
 Default fallback cache lifetimes are four hours for Service documents, one hour for Collections,
-and five minutes for Offerings. HTTP cache directives take precedence. Provide distinct `transport`
-and `supporting_transport` instances when protocol resources and linked schemas require different
-credentials or network policy.
+five minutes for Offerings, zero for searches, one hour for Filter and Sort Definitions, and
+24 hours for Attribute Schemas. Set each independently using `CacheFallbacks` (`service_document`,
+`collection`, `offering`, `search`, `filters`, `sorts`, and `attribute_schema`). HTTP cache directives
+take precedence. Continuations retain their originating operation's fallback; an unrecognized
+continuation uses the search fallback. `ServiceClient` uses a
+separate anonymous transport for linked schemas and OpenAPI documents, even when its primary
+`transport` has authentication configured. An explicit `supporting_transport` override must also
+send these requests anonymously; it must not share the primary transport's credentials or cookies.
 
 ### Search across Services
 
@@ -264,10 +269,21 @@ invoke the resolved target.
 
 ### Caching and HTTP transport
 
+Clients with a supplied `transport` use separate cache partitions by default. To share cached
+responses between these clients, explicitly supply the same `cache_partition` only when they use
+the same authentication context. Create a new client or select a new partition when changing
+credentials. SDK-owned anonymous transports can share their anonymous partition.
+
 `MemoryCache` is the default process-local cache. Implement the `Cache` protocol when representations
 must survive process restarts or share storage across workers. A custom `Transport` implements
 asynchronous `send()` and `aclose()` methods. Caller-provided caches and transports remain owned by
 the caller.
+
+`HttpRequest.maximum_response_bytes` gives a custom transport the response budget. Enforce it while
+reading, rather than buffering the complete response first. The built-in transport closes responses
+on overflow, read failure, and cancellation. A successful response exceeding its budget raises
+`TransportError` with `code="RESPONSE_LIMIT_EXCEEDED"`; `ServiceClient` preserves that code on
+`AgentError`. Oversized error bodies are discarded while retaining the HTTP status and headers.
 
 The built-in HTTP transport resolves and validates every destination before connecting, pins the
 connection to a validated public address, does not inherit proxy settings from the environment, and
@@ -278,7 +294,8 @@ network and credential-isolation requirements. Local HTTP development is disable
 
 Attribute Schema resolution accepts JSON Schema Draft 2020-12 and is limited to 256 KiB per
 document, 16 documents, eight reference levels, and one MiB for the complete graph. OpenAPI
-documents are limited to one MiB. These are fixed SDK safety ceilings. Linked schema documents must
+documents are limited to one MiB and 32 levels of JSON nesting. Every other ODP response is limited
+to 16 levels of nesting, and the Service Document to eight. These are fixed SDK safety ceilings. Linked schema documents must
 use HTTPS. Cross-document schema composition uses `$ref`; `$dynamicRef` accepts only a fragment
 reference such as `#node`.
 
@@ -340,9 +357,20 @@ its Actions can advertise enrollment, payment, and trust protocols, but ODP does
 credentials, invoke Actions, submit payments, or implement trust protocols. Applications compose
 the appropriate protocol clients around an Action resolved through ODP.
 
-`parse_service_document` is the strict current-version Service parser. Agent inspection and
+`parse_service_document` validates Service metadata against the supported ODP major version.
+Compatible minor versions such as `1.7` are accepted without rewriting the received version;
+SDK-generated documents use `1.0`. Agent inspection and
 Directory results filter unrecognized enrollment, payment, and trust descriptors while retaining
 strict validation for recognized descriptors.
+
+Individual Offering and Collection GETs default to full representations; list and search operations
+default to terse items. The Service handler writes `odp_version` on standalone resources and page
+envelopes, omitting it from embedded page items without changing the Catalog's models.
+A Catalog receives the requested language in `CatalogRequest.language` and
+declares the language it actually returns on each resource. Static catalogs do not translate content.
+
+Refinement parsing detects duplicate JSON values without guessing the type of a string. Comparing
+decimal or date-time strings by their meaning requires the referenced Filter Definition.
 
 ## Errors and validation
 
@@ -356,6 +384,10 @@ Each role exposes typed errors:
 Protocol models preserve additive members in `model.additional` and round-trip them through
 `model.to_dict()`. Parsing remains strict for normative constraints and fields that prohibit unknown
 members.
+
+Directory records retain additional metadata such as branding and MCP endpoints. These are discovery
+hints, not authorization or authoritative routing data. The default Agent factory uses the record's
+`service_origin` and retrieves that Service's own document before making catalog requests.
 
 Handle the narrowest error that the application can act upon and use the role's base error for the
 remaining failures:

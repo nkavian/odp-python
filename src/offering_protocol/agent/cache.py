@@ -45,6 +45,10 @@ class CacheFallbacks:
     collection: timedelta = timedelta(hours=1)
     offering: timedelta = timedelta(minutes=5)
     service_document: timedelta = timedelta(hours=4)
+    search: timedelta = timedelta()
+    filters: timedelta = timedelta(hours=1)
+    sorts: timedelta = timedelta(hours=1)
+    attribute_schema: timedelta = timedelta(hours=24)
 
 
 def utc_now() -> datetime:

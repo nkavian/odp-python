@@ -5,7 +5,51 @@ repository=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 consumer=$(mktemp -d)
 trap 'rm -rf "$consumer"' EXIT
 
-python=${ODP_PYTHON:-python3}
+# The consumer venv has to be built with an interpreter this package actually supports. Left to
+# whatever `python3` happens to be on PATH, an older one fails much further downstream: pip filters
+# out every release of a dependency that needs a newer Python and reports "could not find a version
+# that satisfies jsonschema", which says nothing about the interpreter that caused it.
+minimum=$(sed -n 's/^requires-python *= *">=\([0-9.]*\)"/\1/p' "$repository/pyproject.toml")
+: "${minimum:?pyproject.toml does not declare requires-python}"
+
+supports_minimum() {
+  "$1" -c "import sys; raise SystemExit(0 if sys.version_info >= tuple(
+    int(part) for part in '$minimum'.split('.')) else 1)" 2>/dev/null
+}
+
+describe() {
+  command -v "$1" >/dev/null 2>&1 &&
+    "$1" -c 'import platform; print(platform.python_version())' 2>/dev/null ||
+    echo "not found"
+}
+
+python=""
+if [[ -n "${ODP_PYTHON:-}" ]]; then
+  # An interpreter named on purpose is used or refused, never quietly swapped for another one.
+  if ! supports_minimum "$ODP_PYTHON"; then
+    echo "ODP_PYTHON=$ODP_PYTHON is Python $(describe "$ODP_PYTHON")," \
+      "and offering-protocol requires >=$minimum." >&2
+    exit 1
+  fi
+  python="$ODP_PYTHON"
+else
+  for candidate in python3 python3.14 python3.13 python3.12 python3.11; do
+    if command -v "$candidate" >/dev/null 2>&1 && supports_minimum "$candidate"; then
+      python="$candidate"
+      break
+    fi
+  done
+  if [[ -z "$python" ]] && command -v uv >/dev/null 2>&1; then
+    python=$(uv python find ">=$minimum" 2>/dev/null || true)
+  fi
+  if [[ -z "$python" ]]; then
+    echo "offering-protocol requires Python >=$minimum;" \
+      "python3 is $(describe python3) and no newer interpreter was found." >&2
+    echo "Install one, or set ODP_PYTHON to an interpreter that satisfies it." >&2
+    exit 1
+  fi
+fi
+
 "$python" -m venv "$consumer/.venv"
 source=${ODP_CONSUMER_SOURCE:-wheel}
 if [[ "$source" == "wheel" ]]; then

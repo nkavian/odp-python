@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from urllib.parse import urljoin, urlsplit
 
+from jsonschema.exceptions import SchemaError
+from referencing.exceptions import Unresolvable
+
 from offering_protocol.agent.client import AgentError, ServiceClient
 from offering_protocol.agent.schema import resolve_schema
 from offering_protocol.core import (
@@ -17,6 +20,9 @@ from offering_protocol.core import (
 )
 
 _MAXIMUM_OPENAPI_BYTES = 1_048_576
+# OFR-73: an OpenAPI Action document nests deeper than an ODP document, so it has its own
+# allowance rather than the 16 ERR-21 gives every other retrieved document.
+_MAXIMUM_OPENAPI_DEPTH = 32
 
 
 class OfferingIssueScope(StrEnum):
@@ -93,7 +99,8 @@ async def get_offering_details(client: ServiceClient, identifier: str) -> Offeri
                         "Offering attributes do not match their Attribute Schema",
                     )
                 )
-        except (AgentError, ValueError) as error:
+        except (AgentError, ValueError, SchemaError, Unresolvable) as error:
+            attribute_schema = None
             offering = offering.model_copy(update={"attributes": {}})
             issues.append(OfferingIssue(OfferingIssueScope.ATTRIBUTE_SCHEMA, str(error)))
     return OfferingDetails(tuple(actions), attribute_schema, tuple(issues), offering)
@@ -120,6 +127,7 @@ async def resolve_action(client: ServiceClient, offering_id: str, action_id: str
         "application/vnd.oai.openapi+json;version=3.1, application/json;q=0.9",
         {"application/vnd.oai.openapi+json", "application/json"},
         _MAXIMUM_OPENAPI_BYTES,
+        _MAXIMUM_OPENAPI_DEPTH,
     )
     version = document.get("openapi")
     if not isinstance(version, str) or not version.startswith("3.1."):

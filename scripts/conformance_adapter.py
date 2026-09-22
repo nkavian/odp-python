@@ -9,6 +9,7 @@ from typing import Any
 
 from offering_protocol.agent import ServiceClient
 from offering_protocol.core import (
+    Collection,
     CollectionSearchRequest,
     Offering,
     OfferingPage,
@@ -38,7 +39,14 @@ from offering_protocol.core import (
 )
 from offering_protocol.core.validation import _normalize_agent_response
 from offering_protocol.directory.transport import HttpRequest, HttpResponse
-from offering_protocol.service import CatalogRequest, Request, ServiceBuilder
+from offering_protocol.service import (
+    CatalogError,
+    CatalogRequest,
+    Request,
+    ServiceBuilder,
+    StaticCatalog,
+    StaticCatalogOptions,
+)
 
 
 class MapTransport:
@@ -241,7 +249,149 @@ async def evaluate_errors_limits(case: dict[str, Any]) -> bool | None:
     return (result.status == 200) == case["valid"]
 
 
+def capability_definition(value: dict[str, Any], kind: str) -> dict[str, Any]:
+    defaults: dict[str, Any] = {"title": value["id"], "description": value["id"]}
+    if kind == "filters":
+        defaults.update(type="string", operators=["eq"])
+    else:
+        defaults["keys"] = [{"filter_id": "region", "direction": "ascending", "missing": "last"}]
+    result = {**defaults, **value}
+    if kind == "sorts":
+        result["keys"] = [
+            {"direction": "ascending", "missing": "last", **key} for key in result["keys"]
+        ]
+    return result
+
+
+def capability_advertisement(value: dict[str, Any]) -> dict[str, Any]:
+    result = {}
+    for kind, source in value.items():
+        if isinstance(source, list):
+            if not source:
+                continue
+            source = {"inline": source}
+        result[kind] = {
+            **source,
+            **(
+                {"inline": [capability_definition(item, kind) for item in source["inline"]]}
+                if "inline" in source
+                else {}
+            ),
+        }
+    return result
+
+
+async def evaluate_capabilities(case: dict[str, Any]) -> bool | None:
+    operation = case["operation"]
+    origin = case.get("service_origin", "https://service.example")
+    document = service_document()
+    document["operations"] = [
+        {"name": name, "authentication": "not-required"}
+        for name in {
+            "get-offering",
+            "list-offerings",
+            *case.get("operations", ["search-offerings"]),
+        }
+    ]
+    if operation == "validate-advertisement":
+        advertisement = capability_advertisement(case["advertisement"])
+        document["search_capabilities"] = advertisement
+        try:
+            parse_service_document(json.dumps(document))
+            for source in advertisement.values():
+                if "linked" in source:
+                    resolve_continuation(source["linked"]["href"], origin)
+            valid = True
+        except ValueError:
+            valid = False
+        return valid == case["valid"]
+
+    documents = {}
+    if operation in {"validate-linked-source", "validate-linked-page-count"}:
+        reference = case.get("href", "/filters/0")
+        document["search_capabilities"] = {"filters": {"linked": {"href": reference}}}
+        if operation == "validate-linked-source":
+            pages = case["pages"]
+        else:
+            pages = [
+                {
+                    "odp_version": "1.0",
+                    "items": [{"id": f"f{i}"}],
+                    **({"next": f"/filters/{i + 1}"} if i + 1 < case["page_count"] else {}),
+                }
+                for i in range(case["page_count"])
+            ]
+        for page in pages:
+            documents[resolve_continuation(reference, origin)] = response(
+                {
+                    **page,
+                    "items": [capability_definition(item, "filters") for item in page["items"]],
+                }
+            )
+            reference = page.get("next", "")
+    elif operation == "merge-capabilities":
+        document["search_capabilities"] = capability_advertisement(case["service"])
+        document["operations"].append({"name": "get-collection", "authentication": "not-required"})
+        if "collection_id" in case:
+            documents[f"{origin}/odp/collections/{case['collection_id']}?representation=full"] = (
+                response(
+                    {
+                        "odp_version": "1.0",
+                        "id": case["collection_id"],
+                        "name": "Collection",
+                        "search_capabilities": capability_advertisement(
+                            case["selected_collection"]
+                        ),
+                    }
+                )
+            )
+    else:
+        return None
+    documents[f"{origin}/.well-known/odp"] = response(document)
+    async with ServiceClient(origin, transport=MapTransport(documents)) as client:
+        if "collection_id" in case:
+            result = await client.get_collection_search_capabilities(case["collection_id"])
+        else:
+            result = await client.get_offering_search_capabilities()
+    if operation == "merge-capabilities":
+        expected = case["expected"]
+        return (
+            sorted(result.filters) == sorted(expected["filter_ids"])
+            and sorted(result.sorts) == sorted(expected["sort_ids"])
+            and len(result.issues) == len(expected["issues"])
+        )
+    return (not result.issues) == case["valid"]
+
+
 async def evaluate_case(subject: str, case: dict[str, Any], role: str) -> bool | None:
+    if subject == "search-capability-contract" and role == "agent":
+        return await evaluate_capabilities(case)
+    if subject == "collection-hierarchy" and role == "service":
+        if "chain_length" in case:
+            collections = [
+                {"id": f"c{i}", **({"parent_ids": [f"c{i - 1}"]} if i else {})}
+                for i in range(case["chain_length"] + 1)
+            ]
+        else:
+            collections = case["collections"]
+        try:
+            StaticCatalog(
+                StaticCatalogOptions(
+                    collections=tuple(
+                        Collection.model_validate(
+                            {"odp_version": "1.0", "name": value["id"], **value}
+                        )
+                        for value in collections
+                    )
+                )
+            )
+            valid = True
+        except (CatalogError, ValueError):
+            valid = False
+        return valid == case["valid"]
+    if subject == "protocol-version":
+        document = {"odp_version": case["received"], "id": "item", "name": "Item"}
+        return succeeds(lambda: parse_offering(json.dumps(document))) == case["compatible"]
     if subject == "local-identifier":
         return is_local_resource_identifier(case["value"]) == case["valid"]
     if subject == "identity-comparison":
@@ -315,8 +465,13 @@ async def evaluate_case(subject: str, case: dict[str, Any], role: str) -> bool |
             )
             return valid == case["valid"]
         if case.get("operation") == "validate-limit":
-            limit = case["limit"]
-            valid = isinstance(limit, int) and not isinstance(limit, bool) and 1 <= limit <= 100
+            service = ServiceBuilder("Conformance", "Conformance", "en", "/odp").build(
+                EmptyCatalog()
+            )
+            result = await service.handle(
+                Request("GET", "/odp/offerings", query=f"limit={case['limit']}")
+            )
+            valid = result.status == 200
             return valid == case["valid"]
         if case.get("operation") == "validate-next":
             valid = succeeds(lambda: resolve_continuation(case["next"], case["service_origin"]))
@@ -378,7 +533,8 @@ async def evaluate(request: dict[str, Any]) -> dict[str, object]:
             return {
                 "status": "skipped",
                 "message": (
-                    f"No public Python operation maps {request['vector']['subject']}/{operation}"
+                    f"Adapter does not exercise {request['vector']['subject']}/{operation}; "
+                    "this is not a passing conformance result"
                 ),
             }
         return (

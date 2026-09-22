@@ -56,6 +56,7 @@ def _result(value: JsonValue) -> DirectoryResult:
     _text(service, "service_id", 128)
     _origin(service)
     _timestamp(service)
+    candidate = dict(service)
     for name in (
         "branding",
         "http",
@@ -64,9 +65,9 @@ def _result(value: JsonValue) -> DirectoryResult:
         "payment_origins",
         "search_capabilities",
     ):
-        service.pop(name, None)
+        candidate.pop(name, None)
     document = parse_agent_service_document(
-        json.dumps({**service, "odp_version": "1.0", "http": {"endpoint_base": "/"}})
+        json.dumps({**candidate, "odp_version": "1.0", "http": {"endpoint_base": "/"}})
     )
     service["operations"] = [operation.to_dict() for operation in document.operations]
     if document.protocols is None:

@@ -110,6 +110,28 @@ async def test_mixed_results_metadata_unknown_types_and_requests() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["service", "collection"])
+async def test_mixed_results_preserve_descriptive_service_metadata(kind: str) -> None:
+    parent = service()
+    metadata: dict[str, JsonValue] = {
+        "mcp": [{"type": "streamable-http", "url": "/mcp"}],
+        "branding": {"icon": {"src": "/icon.png"}, "logo": {"src": "/logo.png"}},
+        "payment_origins": ["https://payments.example"],
+    }
+    parent.update(metadata)
+    raw = item(kind)
+    raw["service"] = parent
+    result = await DirectoryClient(transport=transport_for({"items": [raw]})).search(
+        ResourceSearchRequest()
+    )
+    assert not result.issues
+    entry = result.items[0]
+    assert isinstance(entry, (ServiceResult, CollectionResult))
+    for key, value in metadata.items():
+        assert entry.service.additional[key] == value
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "path,value",
     [
@@ -166,7 +188,7 @@ async def test_optional_members_and_unverified_metadata() -> None:
     assert not result.issues
     parsed = result.items[0]
     assert isinstance(parsed, ServiceResult)
-    assert "http" not in parsed.service.additional
+    assert parsed.service.additional["http"] == {"endpoint_base": "https://untrusted.example/"}
     assert parsed.service.protocols is None
     assert parsed.available_through is not None and parsed.available_through.name is None
     parent = parsed.service.to_dict()

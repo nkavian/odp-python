@@ -6,14 +6,16 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, cast
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from uuid import uuid4
 
 from offering_protocol.agent.cache import Cache, CacheFallbacks, CacheRecord, MemoryCache, utc_now
 from offering_protocol.core import (
+    VERSION,
     Collection,
     CollectionSearchRequest,
     Offering,
@@ -27,24 +29,26 @@ from offering_protocol.core import (
     build_operation_url,
     derive_service_origin,
     parse_agent_service_document,
+    parse_collection_search_request,
+    parse_offering_search_request,
     resolve_continuation,
 )
 from offering_protocol.core import (
-    parse_collection as parse_collection_strict,
+    parse_agent_collection as parse_agent_collection_strict,
 )
 from offering_protocol.core import (
-    parse_collection_page as parse_collection_page_strict,
+    parse_agent_collection_page as parse_agent_collection_page_strict,
 )
 from offering_protocol.core import (
-    parse_offering as parse_offering_strict,
+    parse_agent_offering as parse_agent_offering_strict,
 )
 from offering_protocol.core import (
-    parse_offering_page as parse_offering_page_strict,
+    parse_agent_offering_page as parse_agent_offering_page_strict,
 )
 from offering_protocol.core import (
     parse_problem_response as parse_problem_response_strict,
 )
-from offering_protocol.core.validation import _normalize_agent_response
+from offering_protocol.core.validation import _agent_body, _nesting_depth
 from offering_protocol.directory.transport import (
     HttpRequest,
     HttpResponse,
@@ -60,7 +64,11 @@ if TYPE_CHECKING:
 MEDIA_TYPE = "application/odp+json"
 _MAXIMUM_DOCUMENT_BYTES = 65_536
 _MAXIMUM_RESOURCE_BYTES = 524_288
+_MAXIMUM_PROBLEM_BYTES = 16_384
 _MAXIMUM_REDIRECTS = 5
+# ERR-21: a Service Document nests no deeper than 8 containers, every other ODP document 16.
+_MAXIMUM_DOCUMENT_DEPTH = 8
+_MAXIMUM_DEPTH = 16
 
 
 class Freshness(StrEnum):
@@ -86,6 +94,10 @@ class TraversalOptions:
 
 class AgentError(RuntimeError):
     """Base error for Service discovery operations."""
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class UnsupportedOperationError(AgentError):
@@ -117,7 +129,7 @@ class ServiceClient:
         allow_local_network: bool = False,
         cache: Cache | None = None,
         cache_fallbacks: CacheFallbacks | None = None,
-        cache_partition: str = "anonymous",
+        cache_partition: str | None = None,
         supporting_transport: Transport | None = None,
         transport: Transport | None = None,
     ) -> None:
@@ -125,10 +137,22 @@ class ServiceClient:
         self._accept_language = accept_language
         self._cache = cache or MemoryCache()
         self._cache_fallbacks = cache_fallbacks or CacheFallbacks()
-        self._cache_partition = cache_partition
+        self._continuation_fallbacks: dict[str, timedelta] = {}
+        self._cache_partition = (
+            cache_partition
+            if cache_partition is not None
+            else str(uuid4())
+            if transport is not None
+            else "anonymous"
+        )
         self._owns_transport = transport is None
         self._transport = transport or HttpxTransport(allow_local_network=allow_local_network)
-        self._supporting_transport = supporting_transport or self._transport
+        self._owns_supporting_transport = supporting_transport is None
+        self._supporting_transport = (
+            supporting_transport
+            if supporting_transport is not None
+            else HttpxTransport(allow_local_network=allow_local_network)
+        )
 
     async def __aenter__(self) -> ServiceClient:
         return self
@@ -137,8 +161,12 @@ class ServiceClient:
         await self.aclose()
 
     async def aclose(self) -> None:
-        if self._owns_transport:
-            await self._transport.aclose()
+        try:
+            if self._owns_transport:
+                await self._transport.aclose()
+        finally:
+            if self._owns_supporting_transport:
+                await self._supporting_transport.aclose()
 
     async def inspect(self) -> Inspection:
         requested_url = f"{self.service_origin}/.well-known/odp"
@@ -149,6 +177,7 @@ class ServiceClient:
             _MAXIMUM_DOCUMENT_BYTES,
             self._cache_fallbacks.service_document,
             parse_agent_service_document,
+            _MAXIMUM_DOCUMENT_DEPTH,
         )
         return Inspection(
             document=parse_agent_service_document(response.body),
@@ -184,10 +213,7 @@ class ServiceClient:
         self, representation: Representation = Representation.TERSE, limit: int = 0
     ) -> Page[Collection]:
         body = await self._get_page(Operation.LIST_COLLECTIONS, None, representation, limit)
-        page = parse_collection_page(body)
-        for item in page.items:
-            parse_collection(_encode(item))
-        return page
+        return parse_collection_page(body)
 
     async def get_collection(self, identifier: str) -> Collection:
         body = await self._get_page(Operation.GET_COLLECTION, identifier, Representation.FULL, 0)
@@ -201,10 +227,7 @@ class ServiceClient:
         body = await self._post_search(
             Operation.SEARCH_COLLECTIONS, request.to_dict(), representation
         )
-        page = parse_collection_page(body)
-        for item in page.items:
-            parse_collection(_encode(item))
-        return page
+        return parse_collection_page(body)
 
     async def list_offerings(
         self, representation: Representation = Representation.TERSE, limit: int = 0
@@ -239,26 +262,32 @@ class ServiceClient:
 
     async def continue_collections(self, next_reference: str) -> Page[Collection]:
         target = resolve_continuation(next_reference, self.service_origin)
+        fallback = self._continuation_fallbacks.get(target, self._cache_fallbacks.search)
         response = await self._request_cached(
             "GET",
             target,
             b"",
             _MAXIMUM_RESOURCE_BYTES,
-            self._cache_fallbacks.collection,
+            fallback,
             parse_collection_page,
+            cache_context=f"continuation:{fallback.total_seconds()}",
         )
+        self._remember_continuation(response.body, fallback)
         return parse_collection_page(response.body)
 
     async def continue_offerings(self, next_reference: str) -> OfferingPage[Offering]:
         target = resolve_continuation(next_reference, self.service_origin)
+        fallback = self._continuation_fallbacks.get(target, self._cache_fallbacks.search)
         response = await self._request_cached(
             "GET",
             target,
             b"",
             _MAXIMUM_RESOURCE_BYTES,
-            self._cache_fallbacks.offering,
+            fallback,
             parse_offering_page,
+            cache_context=f"continuation:{fallback.total_seconds()}",
         )
+        self._remember_continuation(response.body, fallback)
         return parse_offering_page(response.body)
 
     async def list_all_collections(
@@ -345,30 +374,42 @@ class ServiceClient:
         response = await self._request_cached(
             "GET", target, b"", _MAXIMUM_RESOURCE_BYTES, fallback, parser
         )
+        if operation not in {Operation.GET_COLLECTION, Operation.GET_OFFERING}:
+            self._remember_continuation(response.body, fallback)
         return response.body
 
     async def _post_search(
         self, operation: Operation, value: Mapping[str, object], representation: Representation
     ) -> bytes:
+        body = json.dumps({"odp_version": VERSION, **value}, separators=(",", ":")).encode()
+        parser = (
+            parse_collection_search_request
+            if operation is Operation.SEARCH_COLLECTIONS
+            else parse_offering_search_request
+        )
+        parser(body)
         inspection = await self._require_operation(operation)
         target = build_operation_url(
             inspection.document.http.endpoint_base, operation, self.service_origin, None
         )
         target = _append_query(target, {"representation": representation.value})
-        fallback = (
-            self._cache_fallbacks.collection
-            if operation is Operation.SEARCH_COLLECTIONS
-            else self._cache_fallbacks.offering
-        )
+        fallback = self._cache_fallbacks.search
         response = await self._request_cached(
             "POST",
             target,
-            json.dumps(value, separators=(",", ":")).encode(),
+            body,
             _MAXIMUM_RESOURCE_BYTES,
             fallback,
             _operation_parser(operation),
         )
+        self._remember_continuation(response.body, fallback)
         return response.body
+
+    def _remember_continuation(self, body: bytes, fallback: timedelta) -> None:
+        reference = json.loads(body).get("next")
+        if reference:
+            target = resolve_continuation(reference, self.service_origin)
+            self._continuation_fallbacks[target] = fallback
 
     async def _require_operation(self, operation: Operation) -> Inspection:
         inspection = await self.inspect()
@@ -384,8 +425,11 @@ class ServiceClient:
         maximum_bytes: int,
         fallback: timedelta,
         parser: object,
+        maximum_depth: int = _MAXIMUM_DEPTH,
+        *,
+        cache_context: str = "",
     ) -> _FetchedResponse:
-        key = self._cache_key(method, target, body)
+        key = self._cache_key(method, target, body) + cache_context
         cached = self._cache.get(key)
         now = utc_now()
         if cached is not None and now < cached.expires:
@@ -399,7 +443,9 @@ class ServiceClient:
                 headers["if-none-match"] = cached.etag
             if cached.last_modified:
                 headers["if-modified-since"] = cached.last_modified
-        response, final_url = await self._request_raw(method, request_target, body, headers)
+        response, final_url = await self._request_raw(
+            method, request_target, body, headers, maximum_bytes
+        )
         if response.status == 304:
             if cached is None:
                 raise AgentError("ODP response returned 304 without a cached representation")
@@ -415,7 +461,7 @@ class ServiceClient:
             record = replace(cached, expires=expires, final_url=final_url, stored=now)
             self._cache.set(key, record)
             return _FetchedResponse(record.body, record.final_url, Freshness.REVALIDATED)
-        response = _consume(response, maximum_bytes)
+        response = _consume(response, maximum_bytes, maximum_depth)
         _invoke_parser(parser, response.body)
         if _cacheable(method, response.headers, fallback):
             self._cache.set(
@@ -435,7 +481,7 @@ class ServiceClient:
         return _FetchedResponse(response.body, final_url, Freshness.FETCHED)
 
     async def _request_raw(
-        self, method: str, target: str, body: bytes, conditional: dict[str, str]
+        self, method: str, target: str, body: bytes, conditional: dict[str, str], maximum_bytes: int
     ) -> tuple[HttpResponse, str]:
         redirect_origin = derive_service_origin(target)
         for redirects in range(_MAXIMUM_REDIRECTS + 1):
@@ -445,9 +491,11 @@ class ServiceClient:
             if body:
                 headers["content-type"] = MEDIA_TYPE
             try:
-                response = await self._transport.send(HttpRequest(method, target, headers, body))
+                response = await self._transport.send(
+                    HttpRequest(method, target, headers, body, maximum_response_bytes=maximum_bytes)
+                )
             except TransportError as error:
-                raise AgentError(f"ODP Service request failed: {error}") from error
+                raise AgentError(f"ODP Service request failed: {error}", code=error.code) from error
             if response.status not in {301, 302, 303, 307, 308}:
                 return response, target
             if redirects == _MAXIMUM_REDIRECTS:
@@ -476,7 +524,27 @@ class ServiceClient:
         accept: str,
         media_types: set[str],
         maximum_bytes: int,
+        maximum_depth: int | None = None,
     ) -> dict[str, object]:
+        response = await self._supporting_document(
+            target, resource_class, accept, media_types, maximum_bytes, maximum_depth
+        )
+        return _decode_json_object(response.body)
+
+    async def _supporting_document(
+        self,
+        target: str,
+        resource_class: str,
+        accept: str,
+        media_types: set[str],
+        maximum_bytes: int,
+        maximum_depth: int | None = None,
+    ) -> _FetchedResponse:
+        fallback = (
+            self._cache_fallbacks.attribute_schema
+            if resource_class == "attribute-schema"
+            else timedelta()
+        )
         current = target
         if not _is_https_url(current):
             raise AgentError("ODP supporting document URL must use HTTPS")
@@ -484,29 +552,45 @@ class ServiceClient:
         cached = self._cache.get(key)
         now = utc_now()
         if cached is not None and now < cached.expires:
-            return _decode_json_object(cached.body)
+            return _FetchedResponse(cached.body, cached.final_url, Freshness.FRESH)
         conditional: dict[str, str] = {}
         if cached is not None:
             if cached.etag:
                 conditional["if-none-match"] = cached.etag
             if cached.last_modified:
                 conditional["if-modified-since"] = cached.last_modified
+        visited: set[str] = set()
         for redirects in range(_MAXIMUM_REDIRECTS + 1):
+            if current in visited:
+                raise AgentError("ODP supporting document contains a redirect loop")
+            visited.add(current)
             try:
                 response = await self._supporting_transport.send(
-                    HttpRequest("GET", current, {"accept": accept, **conditional})
+                    HttpRequest(
+                        "GET",
+                        current,
+                        {"accept": accept, **conditional},
+                        maximum_response_bytes=maximum_bytes,
+                    )
                 )
             except TransportError as error:
-                raise AgentError(f"ODP supporting document request failed: {error}") from error
+                raise AgentError(
+                    f"ODP supporting document request failed: {error}", code=error.code
+                ) from error
             if response.status in {301, 302, 303, 307, 308}:
                 if redirects == _MAXIMUM_REDIRECTS:
                     raise AgentError("ODP supporting document exceeded five redirects")
                 location = response.headers.get("location")
                 if location is None:
                     raise AgentError("ODP supporting document redirect omitted Location")
-                current = urljoin(current, location)
-                if not _is_https_url(current):
+                target_url = urljoin(current, location)
+                if not _is_https_url(target_url):
                     raise AgentError("ODP supporting document redirect must use HTTPS")
+                if derive_service_origin(target_url) != derive_service_origin(current):
+                    raise AgentError(
+                        "ODP supporting document redirect must remain on the same origin"
+                    )
+                current = target_url
                 continue
             if response.status == 304:
                 if cached is None:
@@ -518,7 +602,7 @@ class ServiceClient:
                 else:
                     lifetime = cached.expires - cached.stored
                     expires = (
-                        _expiration(response.headers, timedelta(), now)
+                        _expiration(response.headers, fallback, now)
                         if _has_freshness(response.headers)
                         else now + max(lifetime, timedelta())
                     )
@@ -526,7 +610,7 @@ class ServiceClient:
                         key,
                         replace(cached, expires=expires, final_url=current, stored=now),
                     )
-                return _decode_json_object(cached.body)
+                return _FetchedResponse(cached.body, current, Freshness.REVALIDATED)
             if not 200 <= response.status < 300:
                 raise ServiceRequestError(
                     response.status,
@@ -534,18 +618,22 @@ class ServiceClient:
                     response.headers,
                 )
             if len(response.body) > maximum_bytes:
-                raise AgentError("ODP supporting document exceeds its byte limit")
+                raise AgentError(
+                    "ODP supporting document exceeds its byte limit", code="RESPONSE_LIMIT_EXCEEDED"
+                )
             content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
             if content_type not in media_types:
                 raise AgentError("ODP supporting document has an unsupported media type")
-            value = _decode_json_object(response.body)
-            if _cacheable("GET", response.headers, timedelta()):
+            if maximum_depth is not None:
+                _require_depth(response.body, maximum_depth, "ODP supporting document")
+            _decode_json_object(response.body)
+            if _cacheable("GET", response.headers, fallback):
                 self._cache.set(
                     key,
                     CacheRecord(
                         body=response.body,
                         etag=response.headers.get("etag"),
-                        expires=_expiration(response.headers, timedelta(), now),
+                        expires=_expiration(response.headers, fallback, now),
                         final_url=current,
                         last_modified=response.headers.get("last-modified"),
                         status=response.status,
@@ -554,7 +642,7 @@ class ServiceClient:
                 )
             else:
                 self._cache.delete(key)
-            return value
+            return _FetchedResponse(response.body, current, Freshness.FETCHED)
         raise AgentError("ODP supporting document exceeded its redirect limit")  # pragma: no cover
 
     def _cache_key(self, method: str, target: str, body: bytes) -> str:
@@ -584,37 +672,23 @@ def _operation_parser(operation: Operation) -> object:
 
 
 def parse_collection(data: bytes | str) -> Collection:
-    return parse_collection_strict(_normalize_body(data, "collection"))
+    return parse_agent_collection_strict(data)
 
 
 def parse_offering(data: bytes | str) -> Offering:
-    return parse_offering_strict(_normalize_body(data, "offering"))
+    return parse_agent_offering_strict(data)
 
 
 def parse_collection_page(data: bytes | str) -> Page[Collection]:
-    return parse_collection_page_strict(_normalize_body(data, "collection-page"))
+    return parse_agent_collection_page_strict(data)
 
 
 def parse_offering_page(data: bytes | str) -> OfferingPage[Offering]:
-    return parse_offering_page_strict(_normalize_body(data, "offering-page"))
+    return parse_agent_offering_page_strict(data)
 
 
 def parse_problem_response(data: bytes | str, status: int) -> ProblemDetails:
-    return parse_problem_response_strict(_normalize_body(data, "problem"), status)
-
-
-def _normalize_body(data: bytes | str, kind: str) -> str:
-    raw = json.loads(data)
-    if not isinstance(raw, dict):
-        return data.decode() if isinstance(data, bytes) else data
-    return json.dumps(_normalize_agent_response(raw, kind), separators=(",", ":"))
-
-
-def _encode(value: object) -> bytes:
-    if not hasattr(value, "model_dump_json"):
-        raise TypeError("ODP model is not serializable")
-    encoded = value.model_dump_json(by_alias=True, exclude_unset=True)
-    return cast(str, encoded).encode()
+    return parse_problem_response_strict(_agent_body(data, "problem"), status)
 
 
 def _append_query(target: str, values: dict[str, str]) -> str:
@@ -634,25 +708,55 @@ def _decode_json_object(data: bytes) -> dict[str, object]:
         value = json.loads(data)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise AgentError(f"ODP supporting document is invalid JSON: {error}") from error
+    except RecursionError as error:
+        raise AgentError("ODP supporting document is nested too deeply") from error
     if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
         raise AgentError("ODP supporting document must be a JSON object")
     return cast(dict[str, object], value)
 
 
-def _consume(response: HttpResponse, maximum_bytes: int) -> HttpResponse:
-    if len(response.body) > maximum_bytes:
-        raise AgentError("ODP response exceeds its byte limit")
+def _consume(response: HttpResponse, maximum_bytes: int, maximum_depth: int) -> HttpResponse:
     if not 200 <= response.status < 300:
-        try:
-            problem = parse_problem_response(response.body, response.status)
-            message = problem.detail or problem.title
-        except ValueError:
-            message = response.body.decode(errors="replace")
-        raise ServiceRequestError(response.status, message, response.headers)
+        raise ServiceRequestError(response.status, _problem_message(response), response.headers)
+    if len(response.body) > maximum_bytes:
+        raise AgentError("ODP response exceeds its byte limit", code="RESPONSE_LIMIT_EXCEEDED")
     content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     if content_type != MEDIA_TYPE:
         raise AgentError(f"ODP response must use {MEDIA_TYPE}")
+    _require_depth(response.body, maximum_depth, "ODP response")
     return response
+
+
+def _problem_message(response: HttpResponse) -> str:
+    """Describes a refused request, reading the body only within the Problem Details limit.
+
+    ERR-21 budgets a Problem Details response at 16,384 bytes, so a larger body is not a Problem
+    Details document this Agent will read. The HTTP status still describes the failure, which is
+    why an oversized error body reports the status rather than a byte-limit error.
+    """
+    if len(response.body) > _MAXIMUM_PROBLEM_BYTES:
+        return f"ODP request failed with HTTP {response.status}"
+    try:
+        problem = parse_problem_response(response.body, response.status)
+    except ValueError:
+        return response.body.decode(errors="replace")
+    return problem.detail or problem.title
+
+
+def _require_depth(body: bytes, maximum: int, subject: str) -> None:
+    """Rejects a document nested deeper than ERR-21 allows.
+
+    A malformed body is left alone here so the document parser reports it in its own words. Depth
+    is counted the way ERR-18 measures it, from the top-level value, and the walk keeps its own
+    stack: a recursive one would exhaust the interpreter on exactly the documents this limit exists
+    to refuse.
+    """
+    try:
+        value = json.loads(body)
+    except (RecursionError, UnicodeDecodeError, ValueError):
+        return
+    if _nesting_depth(value) > maximum:
+        raise AgentError(f"{subject} exceeds its nesting-depth limit")
 
 
 def _traversal_bounds(options: TraversalOptions) -> tuple[int, int]:
@@ -699,8 +803,13 @@ def _expiration(headers: dict[str, str], fallback: timedelta, now: datetime) -> 
     except (KeyError, ValueError):
         pass
     if "expires" in headers:
+        # RFC 9111 5.3: an `Expires` a cache cannot read -- "0" above all -- names a time in the
+        # past, so an unreadable one expires the entry instead of granting it the fallback
+        # lifetime. A date written with the "-0000" zone parses to a naive value, which cannot be
+        # compared with the aware clock this cache keeps, so it is read as the UTC it means.
         try:
-            return parsedate_to_datetime(headers["expires"])
+            expires = parsedate_to_datetime(headers["expires"])
         except (TypeError, ValueError):
-            pass
+            return now
+        return expires if expires.tzinfo is not None else expires.replace(tzinfo=UTC)
     return now + fallback
