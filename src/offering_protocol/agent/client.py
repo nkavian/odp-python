@@ -11,9 +11,11 @@ from email.utils import parsedate_to_datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, cast
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from uuid import uuid4
 
 from offering_protocol.agent.cache import Cache, CacheFallbacks, CacheRecord, MemoryCache, utc_now
 from offering_protocol.core import (
+    VERSION,
     Collection,
     CollectionSearchRequest,
     Offering,
@@ -27,6 +29,8 @@ from offering_protocol.core import (
     build_operation_url,
     derive_service_origin,
     parse_agent_service_document,
+    parse_collection_search_request,
+    parse_offering_search_request,
     resolve_continuation,
 )
 from offering_protocol.core import (
@@ -44,7 +48,7 @@ from offering_protocol.core import (
 from offering_protocol.core import (
     parse_problem_response as parse_problem_response_strict,
 )
-from offering_protocol.core.validation import _agent_body
+from offering_protocol.core.validation import _agent_body, _nesting_depth
 from offering_protocol.directory.transport import (
     HttpRequest,
     HttpResponse,
@@ -125,7 +129,7 @@ class ServiceClient:
         allow_local_network: bool = False,
         cache: Cache | None = None,
         cache_fallbacks: CacheFallbacks | None = None,
-        cache_partition: str = "anonymous",
+        cache_partition: str | None = None,
         supporting_transport: Transport | None = None,
         transport: Transport | None = None,
     ) -> None:
@@ -133,7 +137,14 @@ class ServiceClient:
         self._accept_language = accept_language
         self._cache = cache or MemoryCache()
         self._cache_fallbacks = cache_fallbacks or CacheFallbacks()
-        self._cache_partition = cache_partition
+        self._continuation_fallbacks: dict[str, timedelta] = {}
+        self._cache_partition = (
+            cache_partition
+            if cache_partition is not None
+            else str(uuid4())
+            if transport is not None
+            else "anonymous"
+        )
         self._owns_transport = transport is None
         self._transport = transport or HttpxTransport(allow_local_network=allow_local_network)
         self._owns_supporting_transport = supporting_transport is None
@@ -251,26 +262,32 @@ class ServiceClient:
 
     async def continue_collections(self, next_reference: str) -> Page[Collection]:
         target = resolve_continuation(next_reference, self.service_origin)
+        fallback = self._continuation_fallbacks.get(target, self._cache_fallbacks.search)
         response = await self._request_cached(
             "GET",
             target,
             b"",
             _MAXIMUM_RESOURCE_BYTES,
-            self._cache_fallbacks.collection,
+            fallback,
             parse_collection_page,
+            cache_context=f"continuation:{fallback.total_seconds()}",
         )
+        self._remember_continuation(response.body, fallback)
         return parse_collection_page(response.body)
 
     async def continue_offerings(self, next_reference: str) -> OfferingPage[Offering]:
         target = resolve_continuation(next_reference, self.service_origin)
+        fallback = self._continuation_fallbacks.get(target, self._cache_fallbacks.search)
         response = await self._request_cached(
             "GET",
             target,
             b"",
             _MAXIMUM_RESOURCE_BYTES,
-            self._cache_fallbacks.offering,
+            fallback,
             parse_offering_page,
+            cache_context=f"continuation:{fallback.total_seconds()}",
         )
+        self._remember_continuation(response.body, fallback)
         return parse_offering_page(response.body)
 
     async def list_all_collections(
@@ -357,30 +374,42 @@ class ServiceClient:
         response = await self._request_cached(
             "GET", target, b"", _MAXIMUM_RESOURCE_BYTES, fallback, parser
         )
+        if operation not in {Operation.GET_COLLECTION, Operation.GET_OFFERING}:
+            self._remember_continuation(response.body, fallback)
         return response.body
 
     async def _post_search(
         self, operation: Operation, value: Mapping[str, object], representation: Representation
     ) -> bytes:
+        body = json.dumps({"odp_version": VERSION, **value}, separators=(",", ":")).encode()
+        parser = (
+            parse_collection_search_request
+            if operation is Operation.SEARCH_COLLECTIONS
+            else parse_offering_search_request
+        )
+        parser(body)
         inspection = await self._require_operation(operation)
         target = build_operation_url(
             inspection.document.http.endpoint_base, operation, self.service_origin, None
         )
         target = _append_query(target, {"representation": representation.value})
-        fallback = (
-            self._cache_fallbacks.collection
-            if operation is Operation.SEARCH_COLLECTIONS
-            else self._cache_fallbacks.offering
-        )
+        fallback = self._cache_fallbacks.search
         response = await self._request_cached(
             "POST",
             target,
-            json.dumps(value, separators=(",", ":")).encode(),
+            body,
             _MAXIMUM_RESOURCE_BYTES,
             fallback,
             _operation_parser(operation),
         )
+        self._remember_continuation(response.body, fallback)
         return response.body
+
+    def _remember_continuation(self, body: bytes, fallback: timedelta) -> None:
+        reference = json.loads(body).get("next")
+        if reference:
+            target = resolve_continuation(reference, self.service_origin)
+            self._continuation_fallbacks[target] = fallback
 
     async def _require_operation(self, operation: Operation) -> Inspection:
         inspection = await self.inspect()
@@ -397,8 +426,10 @@ class ServiceClient:
         fallback: timedelta,
         parser: object,
         maximum_depth: int = _MAXIMUM_DEPTH,
+        *,
+        cache_context: str = "",
     ) -> _FetchedResponse:
-        key = self._cache_key(method, target, body)
+        key = self._cache_key(method, target, body) + cache_context
         cached = self._cache.get(key)
         now = utc_now()
         if cached is not None and now < cached.expires:
@@ -495,6 +526,25 @@ class ServiceClient:
         maximum_bytes: int,
         maximum_depth: int | None = None,
     ) -> dict[str, object]:
+        response = await self._supporting_document(
+            target, resource_class, accept, media_types, maximum_bytes, maximum_depth
+        )
+        return _decode_json_object(response.body)
+
+    async def _supporting_document(
+        self,
+        target: str,
+        resource_class: str,
+        accept: str,
+        media_types: set[str],
+        maximum_bytes: int,
+        maximum_depth: int | None = None,
+    ) -> _FetchedResponse:
+        fallback = (
+            self._cache_fallbacks.attribute_schema
+            if resource_class == "attribute-schema"
+            else timedelta()
+        )
         current = target
         if not _is_https_url(current):
             raise AgentError("ODP supporting document URL must use HTTPS")
@@ -502,7 +552,7 @@ class ServiceClient:
         cached = self._cache.get(key)
         now = utc_now()
         if cached is not None and now < cached.expires:
-            return _decode_json_object(cached.body)
+            return _FetchedResponse(cached.body, cached.final_url, Freshness.FRESH)
         conditional: dict[str, str] = {}
         if cached is not None:
             if cached.etag:
@@ -552,7 +602,7 @@ class ServiceClient:
                 else:
                     lifetime = cached.expires - cached.stored
                     expires = (
-                        _expiration(response.headers, timedelta(), now)
+                        _expiration(response.headers, fallback, now)
                         if _has_freshness(response.headers)
                         else now + max(lifetime, timedelta())
                     )
@@ -560,7 +610,7 @@ class ServiceClient:
                         key,
                         replace(cached, expires=expires, final_url=current, stored=now),
                     )
-                return _decode_json_object(cached.body)
+                return _FetchedResponse(cached.body, current, Freshness.REVALIDATED)
             if not 200 <= response.status < 300:
                 raise ServiceRequestError(
                     response.status,
@@ -576,14 +626,14 @@ class ServiceClient:
                 raise AgentError("ODP supporting document has an unsupported media type")
             if maximum_depth is not None:
                 _require_depth(response.body, maximum_depth, "ODP supporting document")
-            value = _decode_json_object(response.body)
-            if _cacheable("GET", response.headers, timedelta()):
+            _decode_json_object(response.body)
+            if _cacheable("GET", response.headers, fallback):
                 self._cache.set(
                     key,
                     CacheRecord(
                         body=response.body,
                         etag=response.headers.get("etag"),
-                        expires=_expiration(response.headers, timedelta(), now),
+                        expires=_expiration(response.headers, fallback, now),
                         final_url=current,
                         last_modified=response.headers.get("last-modified"),
                         status=response.status,
@@ -592,7 +642,7 @@ class ServiceClient:
                 )
             else:
                 self._cache.delete(key)
-            return value
+            return _FetchedResponse(response.body, current, Freshness.FETCHED)
         raise AgentError("ODP supporting document exceeded its redirect limit")  # pragma: no cover
 
     def _cache_key(self, method: str, target: str, body: bytes) -> str:
@@ -707,27 +757,6 @@ def _require_depth(body: bytes, maximum: int, subject: str) -> None:
         return
     if _nesting_depth(value) > maximum:
         raise AgentError(f"{subject} exceeds its nesting-depth limit")
-
-
-def _nesting_depth(value: object) -> int:
-    """Counts container nesting from the top-level value.
-
-    `{}` and `{"a": 1}` are both depth 1 and `{"a": {"b": 1}}` is depth 2: a scalar is a value a
-    container holds, not a level of its own.
-    """
-    maximum = 0
-    pending: list[tuple[int, object]] = [(1, value)]
-    while pending:
-        depth, current = pending.pop()
-        if isinstance(current, dict):
-            children: list[object] = list(current.values())
-        elif isinstance(current, list):
-            children = list(current)
-        else:
-            continue
-        maximum = max(maximum, depth)
-        pending.extend((depth + 1, child) for child in children)
-    return maximum
 
 
 def _traversal_bounds(options: TraversalOptions) -> tuple[int, int]:

@@ -475,10 +475,10 @@ async def test_refuses_a_repeated_representation() -> None:
 
 @pytest.mark.asyncio
 async def test_refuses_a_representation_or_limit_it_cannot_honour() -> None:
-    for query in ("representation=sideways", "limit=101", "limit=-1", "limit=many"):
+    for query in ("representation=sideways", "limit=101", "limit=-1", "limit=many", "limit=0"):
         assert (await call("GET", "/odp/offerings", query=query)).status == 400, query
 
-    for query in ("representation=full", "representation=terse", "limit=100", "limit=0"):
+    for query in ("representation=full", "representation=terse", "limit=100"):
         assert (await call("GET", "/odp/offerings", query=query)).status == 200, query
 
 

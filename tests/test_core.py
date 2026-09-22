@@ -85,7 +85,7 @@ def test_normalizes_agent_response_capabilities() -> None:
     )
     assert service["operations"] == [{"authentication": "not-required", "name": "list-offerings"}]
     assert service["mcp"] == [{"type": "streamable-http", "url": "/mcp"}]
-    assert service["branding"] == {"logo": {"src": "/logo", "type": "image/png"}}
+    assert "branding" not in service
     assert service["protocols"]["payments"][0]["options"] == ["inflow"]
     assert len(service["search_capabilities"]["filters"]["inline"]) == 1
     assert len(service["search_capabilities"]["sorts"]["inline"]) == 1

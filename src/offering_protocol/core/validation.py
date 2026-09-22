@@ -278,6 +278,22 @@ def _filter_payment_options(value: dict[str, Any]) -> None:
             payment.pop("options", None)
 
 
+def _nesting_depth(value: object) -> int:
+    maximum = 0
+    pending: list[tuple[int, object]] = [(1, value)]
+    while pending:
+        depth, current = pending.pop()
+        if isinstance(current, dict):
+            children: list[object] = list(current.values())
+        elif isinstance(current, list):
+            children = list(current)
+        else:
+            continue
+        maximum = max(maximum, depth)
+        pending.extend((depth + 1, child) for child in children)
+    return maximum
+
+
 def _normalize_branding(value: dict[str, Any]) -> None:
     branding = value.get("branding")
     if not isinstance(branding, dict):
@@ -290,7 +306,8 @@ def _normalize_branding(value: dict[str, Any]) -> None:
             and isinstance(image.get("type"), str)
             and image["type"] not in {"image/png", "image/svg+xml", "image/webp"}
         ):
-            normalized.pop(member, None)
+            value.pop("branding", None)
+            return
         elif isinstance(image, dict):
             normalized[member] = {
                 key: entry for key, entry in image.items() if key in {"src", "type"}
@@ -325,6 +342,7 @@ def _normalize_offering(value: dict[str, Any]) -> None:
     schema = value.get("schema")
     if isinstance(schema, dict) and set(schema).difference({"url"}):
         value.pop("schema", None)
+        value.pop("attributes", None)
     price = value.get("price")
     if (
         isinstance(price, dict)

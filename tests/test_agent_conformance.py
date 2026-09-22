@@ -29,7 +29,6 @@ from offering_protocol.agent.client import (
     _MAXIMUM_DOCUMENT_DEPTH,
     _consume,
     _expiration,
-    _nesting_depth,
 )
 from offering_protocol.core import (
     CapabilityLink,
@@ -45,6 +44,7 @@ from offering_protocol.core import (
     SortDirection,
     SortKey,
 )
+from offering_protocol.core.validation import _nesting_depth
 from offering_protocol.directory.transport import HttpResponse
 
 ORIGIN = "https://plants.example"
@@ -248,6 +248,73 @@ async def test_a_source_that_exactly_fills_the_bound_is_accepted() -> None:
     await _merge_filters(result, CapabilityScope.COLLECTION, FilterCapabilitySource(inline=exact))
 
     assert len(result.filters) == 1024
+    assert not result.issues
+
+
+@pytest.mark.asyncio
+async def test_linked_duplicate_is_quarantined_when_service_catalog_is_full() -> None:
+    document = json.loads(SERVICE_DOCUMENT)
+    document["operations"].extend(
+        [
+            {"name": "search-offerings", "authentication": "not-required"},
+            {"name": "get-collection", "authentication": "not-required"},
+        ]
+    )
+    document["search_capabilities"] = {"filters": {"linked": {"href": "/filters/0"}}}
+    collection = {
+        "odp_version": "1.0",
+        "id": "plants",
+        "name": "Plants",
+        "search_capabilities": {"filters": {"linked": {"href": "/collection-filters"}}},
+    }
+    pages = [
+        response(
+            _filter_page(
+                [f"f{index}" for index in range(start, min(start + 100, 1024))],
+                f"/filters/{start + 100}" if start + 100 < 1024 else "",
+            )
+        )
+        for start in range(0, 1024, 100)
+    ]
+    transport = QueueTransport(
+        response(json.dumps(document)),
+        response(json.dumps(collection)),
+        *pages,
+        response(_filter_page(["f0"])),
+    )
+    async with ServiceClient(ORIGIN, transport=transport) as client:
+        result = await client.get_collection_search_capabilities("plants")
+    assert len(result.filters) == 1023
+    assert "f0" not in result.filters
+    assert len(result.issues) == 1
+    assert result.issues[0].message == "Duplicate filters: f0"
+
+
+@pytest.mark.asyncio
+async def test_linked_capabilities_skip_only_unknown_definitions() -> None:
+    document = json.loads(SERVICE_DOCUMENT)
+    document["operations"].append({"name": "search-offerings", "authentication": "not-required"})
+    document["search_capabilities"] = {
+        "filters": {"linked": {"href": "/filters"}},
+        "sorts": {"linked": {"href": "/sorts"}},
+    }
+    good_filter = _filter("weight").to_dict()
+    good_sort = _sort("weight").to_dict()
+    filters = {
+        "odp_version": "1.0",
+        "items": [good_filter, {**good_filter, "id": "future", "type": "future"}],
+    }
+    sorts = {
+        "odp_version": "1.0",
+        "items": [good_sort, {**good_sort, "id": "future", "keys": [{"direction": "future"}]}],
+    }
+    transport = QueueTransport(
+        *(response(json.dumps(value)) for value in (document, filters, sorts))
+    )
+    async with ServiceClient(ORIGIN, transport=transport) as client:
+        result = await client.get_offering_search_capabilities()
+    assert list(result.filters) == ["weight"]
+    assert list(result.sorts) == ["weight"]
     assert not result.issues
 
 
@@ -549,7 +616,7 @@ async def test_collection_page_inherits_version_without_requiring_it_on_items(se
     )
     client = ServiceClient("https://store.example", transport=transport)
     page = (
-        await client.search_collections(CollectionSearchRequest())
+        await client.search_collections(CollectionSearchRequest(query="plants"))
         if search
         else await client.list_collections()
     )

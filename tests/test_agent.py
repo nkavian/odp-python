@@ -911,6 +911,7 @@ async def test_remaining_capability_and_cache_branches(monkeypatch: pytest.Monke
     conditional = ServiceClient(
         "https://demo.inflowpay.ai",
         cache=cache,
+        cache_partition="anonymous",
         transport=conditional_transport,
     )
     assert (await conditional.inspect()).freshness is Freshness.REVALIDATED

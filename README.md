@@ -203,7 +203,11 @@ The Agent module also provides:
 - Conditional request and representation caching with injectable `Cache` and `Transport` protocols.
 
 Default fallback cache lifetimes are four hours for Service documents, one hour for Collections,
-and five minutes for Offerings. HTTP cache directives take precedence. `ServiceClient` uses a
+five minutes for Offerings, zero for searches, one hour for Filter and Sort Definitions, and
+24 hours for Attribute Schemas. Set each independently using `CacheFallbacks` (`service_document`,
+`collection`, `offering`, `search`, `filters`, `sorts`, and `attribute_schema`). HTTP cache directives
+take precedence. Continuations retain their originating operation's fallback; an unrecognized
+continuation uses the search fallback. `ServiceClient` uses a
 separate anonymous transport for linked schemas and OpenAPI documents, even when its primary
 `transport` has authentication configured. An explicit `supporting_transport` override must also
 send these requests anonymously; it must not share the primary transport's credentials or cookies.
@@ -264,6 +268,11 @@ Resolution returns metadata only. The application decides whether to enroll, aut
 invoke the resolved target.
 
 ### Caching and HTTP transport
+
+Clients with a supplied `transport` use separate cache partitions by default. To share cached
+responses between these clients, explicitly supply the same `cache_partition` only when they use
+the same authentication context. Create a new client or select a new partition when changing
+credentials. SDK-owned anonymous transports can share their anonymous partition.
 
 `MemoryCache` is the default process-local cache. Implement the `Cache` protocol when representations
 must survive process restarts or share storage across workers. A custom `Transport` implements

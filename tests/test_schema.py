@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 
 import pytest
+from jsonschema.exceptions import SchemaError
 
-from helpers import QueueTransport, response
+from helpers import OFFERING, SERVICE_DOCUMENT, QueueTransport, response
 from offering_protocol.agent import AgentError, ServiceClient
 from offering_protocol.agent.schema import _document_url, _schema_references, resolve_schema
 
@@ -132,7 +133,7 @@ async def test_schema_resolution_rejects_invalid_dialect_and_vocabulary() -> Non
                 )
             ),
         )
-        with pytest.raises(AgentError, match="fragment-only reference"):
+        with pytest.raises(SchemaError if reference is None else AgentError):
             await resolve_schema(
                 unsupported_dynamic_reference,
                 "https://schemas.example/root.json",
@@ -224,3 +225,75 @@ async def test_resolves_embedded_schema_resources() -> None:
     assert resolved.validator.is_valid({"plant": "rubber"})
     assert not resolved.validator.is_valid({"plant": 4})
     assert len(transport.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": "bogus"},
+        {"$ref": "#/$defs/missing"},
+        {"properties": []},
+        {"$vocabulary": {"https://json-schema.org/draft/2020-12/vocab/future": True}},
+        {"$vocabulary": {"https://json-schema.org/draft/2020-12/vocab/format-assertion": True}},
+    ],
+)
+async def test_invalid_schema_reports_issue_without_losing_offering(
+    schema: dict[str, object],
+) -> None:
+    offering = json.loads(OFFERING)
+    offering.update(schema={"url": "https://schemas.example/root"}, attributes={"name": "plant"})
+    async with ServiceClient(
+        "https://service.example",
+        transport=QueueTransport(response(SERVICE_DOCUMENT), response(json.dumps(offering))),
+        supporting_transport=QueueTransport(
+            response(
+                json.dumps({"$schema": DIALECT, **schema}), content_type="application/schema+json"
+            )
+        ),
+    ) as client:
+        result = await client.get_offering_details("rubber-plant")
+    assert result.offering.name == "Rubber Plant"
+    assert not result.offering.attributes
+    assert result.attribute_schema is None
+    assert len(result.issues) == 1
+    assert result.issues[0].scope == "attribute_schema"
+
+
+@pytest.mark.asyncio
+async def test_schema_literals_are_not_interpreted_as_schema_keywords() -> None:
+    literal = {"$ref": "https://unrelated.example/item", "$dynamicRef": "external.json"}
+    schema = {
+        "$schema": DIALECT,
+        "const": literal,
+        "examples": [literal],
+        "properties": {"value": True},
+        "additionalProperties": True,
+    }
+    transport = QueueTransport(response(json.dumps(schema), content_type="application/schema+json"))
+    async with ServiceClient("https://service.example", supporting_transport=transport) as client:
+        resolved = await resolve_schema(client, "https://schemas.example/root")
+    assert resolved.validator.is_valid(literal)
+    assert len(transport.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("identifier", [None, "./root.json"])
+async def test_redirected_schema_uses_final_url_even_from_cache(identifier: str | None) -> None:
+    root = {"$schema": DIALECT, "$ref": "child.json", **({"$id": identifier} if identifier else {})}
+    child = {"$schema": DIALECT, "type": "string"}
+    transport = QueueTransport(
+        response("", status=302, headers={"location": "/v2/root.json"}),
+        response(json.dumps(root), content_type="application/schema+json"),
+        response(json.dumps(child), content_type="application/schema+json"),
+    )
+    async with ServiceClient("https://service.example", supporting_transport=transport) as client:
+        for _ in range(2):
+            result = await resolve_schema(client, "https://schemas.example/root.json")
+            assert result.validator.is_valid("plant")
+            assert not result.validator.is_valid(1)
+    assert [request.url for request in transport.requests] == [
+        "https://schemas.example/root.json",
+        "https://schemas.example/v2/root.json",
+        "https://schemas.example/v2/child.json",
+    ]

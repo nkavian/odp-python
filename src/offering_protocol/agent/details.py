@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from urllib.parse import urljoin, urlsplit
 
+from jsonschema.exceptions import SchemaError
+from referencing.exceptions import Unresolvable
+
 from offering_protocol.agent.client import AgentError, ServiceClient
 from offering_protocol.agent.schema import resolve_schema
 from offering_protocol.core import (
@@ -96,7 +99,8 @@ async def get_offering_details(client: ServiceClient, identifier: str) -> Offeri
                         "Offering attributes do not match their Attribute Schema",
                     )
                 )
-        except (AgentError, ValueError) as error:
+        except (AgentError, ValueError, SchemaError, Unresolvable) as error:
+            attribute_schema = None
             offering = offering.model_copy(update={"attributes": {}})
             issues.append(OfferingIssue(OfferingIssueScope.ATTRIBUTE_SCHEMA, str(error)))
     return OfferingDetails(tuple(actions), attribute_schema, tuple(issues), offering)

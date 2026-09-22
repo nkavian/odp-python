@@ -43,6 +43,7 @@ from offering_protocol.core import (
     parse_offering_search_request,
     parse_service_document,
 )
+from offering_protocol.core.validation import _nesting_depth
 
 MEDIA_TYPE = "application/odp+json"
 PROBLEM_MEDIA_TYPE = "application/problem+json"
@@ -390,8 +391,8 @@ def _catalog_request(
         limit = int(values.get("limit", "0"))
     except ValueError as error:
         raise RequestError(400, "INVALID_REQUEST", "query parameter is invalid") from error
-    if not 0 <= limit <= 100:
-        raise RequestError(400, "INVALID_REQUEST", "limit exceeds 100")
+    if "limit" in values and not 1 <= limit <= 100:
+        raise RequestError(400, "INVALID_REQUEST", "limit must be between 1 and 100")
     return CatalogRequest(
         accept_language=headers.get("accept-language"),
         cursor=values.get("cursor"),
@@ -408,6 +409,16 @@ def _search_body(request: Request, headers: dict[str, str]) -> bytes:
     content_type = headers.get("content-type", "").split(";", 1)[0]
     if content_type != MEDIA_TYPE:
         raise RequestError(415, "UNSUPPORTED_MEDIA_TYPE", f"Content-Type must be {MEDIA_TYPE}")
+    try:
+        value = json.loads(request.body)
+    except RecursionError as error:
+        raise RequestError(
+            413, "REQUEST_TOO_LARGE", "request exceeds its nesting-depth limit"
+        ) from error
+    except (ValueError, UnicodeDecodeError):
+        return request.body
+    if _nesting_depth(value) > 16:
+        raise RequestError(413, "REQUEST_TOO_LARGE", "request exceeds its nesting-depth limit")
     return request.body
 
 
@@ -439,6 +450,8 @@ def _json_response(value: object, maximum_bytes: int, exchange: _Exchange) -> Re
     body = _encode(value)
     if len(body) > maximum_bytes:
         raise ServiceError("response body is too large")
+    if _nesting_depth(json.loads(body)) > (8 if isinstance(value, ServiceDocument) else 16):
+        raise ServiceError("response body exceeds its nesting-depth limit")
     if isinstance(value, Page):
         language = (
             ", ".join(

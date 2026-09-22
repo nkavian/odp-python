@@ -21,6 +21,7 @@ from offering_protocol.core import (
     parse_sort_definition_page,
     resolve_continuation,
 )
+from offering_protocol.core.validation import _agent_body
 
 _MAXIMUM_CAPABILITY_PAGES = 16
 _MAXIMUM_FILTERS = 1_024
@@ -168,7 +169,7 @@ async def _add_source(
     source: FilterCapabilitySource | SortCapabilitySource | None,
     target: dict[str, Any],
     maximum: int,
-    load: Callable[[ServiceClient, str, int], Awaitable[list[Any]]],
+    load: Callable[[ServiceClient, str, int, frozenset[str]], Awaitable[list[Any]]],
     scopes: dict[str, CapabilityScope] | None,
 ) -> None:
     """Merges one capability source into the effective catalog, or reports why it cannot be.
@@ -182,7 +183,7 @@ async def _add_source(
         return
     try:
         values: Sequence[Any] = (
-            await load(client, source.linked.href, maximum - len(target))
+            await load(client, source.linked.href, maximum, frozenset(target))
             if source.linked is not None
             else list(source.inline)
         )
@@ -219,19 +220,25 @@ async def _add_source(
 
 
 async def _load_filters(
-    client: ServiceClient, reference: str, budget: int = _MAXIMUM_FILTERS
+    client: ServiceClient,
+    reference: str,
+    budget: int = _MAXIMUM_FILTERS,
+    existing: frozenset[str] = frozenset(),
 ) -> list[FilterDefinition]:
     values = await _load_definitions(
-        client, reference, budget, parse_filter_definition_page, CapabilityKind.FILTERS
+        client, reference, budget, parse_filter_definition_page, CapabilityKind.FILTERS, existing
     )
     return cast("list[FilterDefinition]", values)
 
 
 async def _load_sorts(
-    client: ServiceClient, reference: str, budget: int = _MAXIMUM_SORTS
+    client: ServiceClient,
+    reference: str,
+    budget: int = _MAXIMUM_SORTS,
+    existing: frozenset[str] = frozenset(),
 ) -> list[SortDefinition]:
     values = await _load_definitions(
-        client, reference, budget, parse_sort_definition_page, CapabilityKind.SORTS
+        client, reference, budget, parse_sort_definition_page, CapabilityKind.SORTS, existing
     )
     return cast("list[SortDefinition]", values)
 
@@ -242,13 +249,15 @@ async def _load_definitions(
     budget: int,
     parse: Callable[[bytes | str], Any],
     kind: CapabilityKind,
+    existing: frozenset[str],
 ) -> list[Any]:
-    """Retrieves a complete linked source, one page at a time.
+    """Stop when new identifiers cannot fit even if all earlier identifiers are quarantined."""
 
-    The budget is what the effective catalog has left. FLT-58 asks the Agent to stop retrieving a
-    source once it cannot fit, so the budget is checked as each page arrives rather than after the
-    whole source has been buffered: a source that can never fit costs one page, not sixteen.
-    """
+    def parse_page(body: bytes | str) -> Any:
+        return parse(
+            _agent_body(body, "filter-page" if kind is CapabilityKind.FILTERS else "sort-page")
+        )
+
     values: list[Any] = []
     next_reference = reference
     visited: set[str] = set()
@@ -259,10 +268,15 @@ async def _load_definitions(
         if target in visited:
             raise AgentError("ODP capability pagination loop detected")
         visited.add(target)
-        body = await client._linked_odp(target, client._cache_fallbacks.collection, parse)
-        page = parse(body)
+        fallback = (
+            client._cache_fallbacks.filters
+            if kind is CapabilityKind.FILTERS
+            else client._cache_fallbacks.sorts
+        )
+        body = await client._linked_odp(target, fallback, parse_page)
+        page = parse_page(body)
         values.extend(page.items)
-        if len(values) > budget:
+        if len({value.id for value in values} - existing) > budget:
             raise AgentError(f"Effective {kind.value} exceed their limit")
         next_reference = page.next
     if next_reference:
