@@ -27,6 +27,11 @@ from offering_protocol.directory.transport import HttpRequest, HttpResponse
 def service() -> dict[str, JsonValue]:
     return {
         "service_id": "parent",
+        "source": {
+            "type": "odp",
+            "url": "https://api.example.com/.well-known/odp",
+            "x402_discovery": False,
+        },
         "service_origin": "https://api.example.com",
         "indexed_at": "2026-09-18T11:00:00Z",
         "name": "Data",
@@ -111,7 +116,7 @@ async def test_mixed_results_metadata_unknown_types_and_requests() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["service", "collection"])
-async def test_mixed_results_preserve_descriptive_service_metadata(kind: str) -> None:
+async def test_mixed_results_drop_unverified_execution_metadata(kind: str) -> None:
     parent = service()
     metadata: dict[str, JsonValue] = {
         "mcp": [{"type": "streamable-http", "url": "/mcp"}],
@@ -127,8 +132,8 @@ async def test_mixed_results_preserve_descriptive_service_metadata(kind: str) ->
     assert not result.issues
     entry = result.items[0]
     assert isinstance(entry, (ServiceResult, CollectionResult))
-    for key, value in metadata.items():
-        assert entry.service.additional[key] == value
+    for key in metadata:
+        assert key not in entry.service.additional
 
 
 @pytest.mark.asyncio
@@ -188,7 +193,7 @@ async def test_optional_members_and_unverified_metadata() -> None:
     assert not result.issues
     parsed = result.items[0]
     assert isinstance(parsed, ServiceResult)
-    assert parsed.service.additional["http"] == {"endpoint_base": "https://untrusted.example/"}
+    assert "http" not in parsed.service.additional
     assert parsed.service.protocols is None
     assert parsed.available_through is not None and parsed.available_through.name is None
     parent = parsed.service.to_dict()

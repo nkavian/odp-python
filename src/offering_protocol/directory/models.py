@@ -50,6 +50,7 @@ class ServiceFilters(OdpModel):
     keywords: list[str] = Field(default_factory=list)
     operations: list[OperationFilter] = Field(default_factory=list)
     payments: list[PaymentFilter] = Field(default_factory=list)
+    sources: list[Literal["odp", "openapi"]] | None = None
     trust: list[TrustProtocol] = Field(default_factory=list)
 
 
@@ -84,6 +85,30 @@ class DirectoryService(OdpModel):
         return value if isinstance(value, str) else None
 
 
+class DirectorySource(OdpModel):
+    type: str
+    url: str
+    x402_discovery: bool
+
+
+class DirectoryIndexedService(OdpModel):
+    description: str | None = None
+    documentation_url: str | None = None
+    indexed_at: str
+    keywords: list[str] = Field(default_factory=list)
+    language: str | None = None
+    localizations: list[str] = Field(default_factory=list)
+    name: str
+    operations: list[OperationDescriptor] = Field(default_factory=list)
+    protocols: ServiceProtocols | None = None
+    service_id: str
+    service_origin: str
+    source: DirectorySource
+    status_url: str | None = None
+    support_url: str | None = None
+    website_url: str | None = None
+
+
 class ServiceReference(OdpModel):
     service_id: str
     service_origin: str
@@ -98,14 +123,14 @@ class CollectionSummary(OdpModel):
 
 class ServiceResult(OdpModel):
     type: Literal["service"]
-    service: DirectoryService
+    service: DirectoryIndexedService
     indexed_at: str
     available_through: ServiceReference | None = None
 
 
 class CollectionResult(OdpModel):
     type: Literal["collection"]
-    service: DirectoryService
+    service: DirectoryIndexedService
     indexed_at: str
     collection: CollectionSummary
 

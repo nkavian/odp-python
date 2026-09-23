@@ -332,6 +332,10 @@ def _validate_search_request(request: SearchRequest) -> None:
         raise DirectoryError(
             "query must contain at most 512 characters without surrounding whitespace"
         )
+    if request.filters is not None and request.filters.sources is not None:
+        sources = request.filters.sources
+        if not 1 <= len(sources) <= 2 or len(set(sources)) != len(sources):
+            raise DirectoryError("sources must contain one or two distinct odp or openapi values")
     if request.filters is not None and (
         len(request.filters.keywords) > 32
         or any(not keyword or len(keyword) > 64 for keyword in request.filters.keywords)

@@ -13,7 +13,7 @@ Services and navigating their Offerings.
 ODP separates two levels of discovery:
 
 1. An Agent searches the canonical Directory for Services.
-2. The Agent inspects a Service's live ODP document and navigates that Service's Collections and
+2. For a native ODP source, the Agent inspects the Service's live ODP document and navigates its Collections and
    Offerings.
 
 The Directory does not copy every Service catalog. Catalog searches go directly to each Service.
@@ -77,16 +77,35 @@ asyncio.run(main())
 an explicit list must be nonempty and distinct. Filters apply to the owning Service's metadata.
 Omit the query to browse. The default and maximum result limit are 100.
 
-A Collection is identified by its owning Service origin and case-sensitive Collection ID.
-Inspect that Service's live ODP document, then call `ServiceClient.get_collection()` for current
-details. The result's `indexed_at` describes Collection freshness; `service.indexed_at` describes
-parent freshness. `service.service_id` is the Directory's Service identifier. A Service result can
+A Collection is identified by its owning `service.service_id` and case-sensitive Collection ID.
+Different OpenAPI documents can share an API origin without being the same Directory Service.
+When `service.source.type == "odp"`, inspect that Service's live ODP document, then call
+`ServiceClient.get_collection()` for current details. OpenAPI Collections are Directory presentation
+groups, not ODP operation targets. The result's `indexed_at` describes Collection freshness;
+`service.indexed_at` describes parent freshness. `service.service_id` is the Directory's Service identifier. A Service result can
 have `available_through` platform attribution; a Collection's attribution is its owning `service`.
 
 Malformed known results are omitted and reported in `issues` with their original response index.
 Unknown future types retain their full JSON in `UnknownResult.raw`; do not treat them as Services
 or execute their metadata. Additional fields are available through `additional`. Directory
 metadata does not replace inspection of the Service's own document.
+
+Mixed results use `DirectoryIndexedService`, separate from the native `DirectoryService` returned
+by `search_services()`. Each mixed Service requires `service_id`, `service_origin`, `name`,
+`indexed_at` and `source`. Imported descriptions and languages are optional; missing lists become
+empty lists. Imported results do not expose native ODP operations. Native results retain ODP
+validation. Unverified execution fields such as `http` and `payment_origins` are not returned.
+
+`DirectorySource` identifies the document used for discovery:
+
+- `type` is `"odp"`, `"openapi"`, or an unknown future string. Unknown formats remain readable
+  but must not be passed to ODP operations.
+- `url` is the exact document URL, including path and query. It can differ from the API origin;
+  do not reconstruct it from `service_origin`.
+- `x402_discovery` records supporting fixed-path x402 discovery, not proof that an endpoint
+  accepts payments. Advertised protocol evidence remains in `protocols`.
+
+The client does not fetch or execute OpenAPI documents.
 
 Mixed search does not currently offer continuation. Missing `next` does **not** mean every match
 was returned. Refine the query or filters when needed. `continue_search(next)` follows one opaque
@@ -105,7 +124,32 @@ are candidate search queries, not resource identifiers.
 
 See the [runnable canonical Directory example](examples/README.md#canonical-directory-discovery).
 
-## Search only Services
+### Filter by source
+
+```python
+from offering_protocol.directory import (
+    DirectoryClient,
+    ResourceSearchRequest,
+    ServiceFilters,
+    SuggestionRequest,
+)
+
+
+async def discover_openapi() -> None:
+    filters = ServiceFilters(sources=["openapi"])
+    async with DirectoryClient() as directory:
+        results = await directory.search(ResourceSearchRequest(query="weather", filters=filters))
+        names = await directory.suggest(SuggestionRequest(prefix="we", filters=filters))
+        print(results.items, names)
+```
+
+Omitting `sources` includes all formats. An explicit list must contain one or both distinct
+`"odp"` and `"openapi"` values. Sources are alternatives, combined with other filter categories
+using AND. Collections inherit their owning Service's source. Unsupported source filter values
+are rejected. Native `search_services()` accepts the filter but remains ODP-only: an OpenAPI-only
+filter returns no native matches.
+
+## Search only native ODP Services
 
 `DirectoryClient` uses the one canonical production Directory. Pass `Environment.SANDBOX` when
 working against InFlow's sandbox; the endpoint itself is not configurable.
@@ -143,6 +187,9 @@ and trust protocols. Use `suggest_services()` to discover Service-only keyword c
 
 ### API migration
 
+- Mixed results use `DirectoryIndexedService` with required source metadata. Missing sources are
+  reported as item issues, not assumed to be ODP. Native Service-only models are unchanged.
+- Imported `description` and `language` can be `None`; check the source before ODP navigation.
 - Service-only `search()` calls become `search_services()`, and `continue_search()` calls become
   `continue_search_services()`.
 - Aggregating `search_services(request, options)` calls become `collect_services(request, options)`.
@@ -385,8 +432,9 @@ Protocol models preserve additive members in `model.additional` and round-trip t
 `model.to_dict()`. Parsing remains strict for normative constraints and fields that prohibit unknown
 members.
 
-Directory records retain additional metadata such as branding and MCP endpoints. These are discovery
-hints, not authorization or authoritative routing data. The default Agent factory uses the record's
+Native Service-only records retain additional metadata such as branding and MCP endpoints. Mixed
+results omit unverified execution fields. Directory metadata is not authorization or authoritative
+routing data. The default Agent factory uses the native record's
 `service_origin` and retrieves that Service's own document before making catalog requests.
 
 Handle the narrowest error that the application can act upon and use the role's base error for the
