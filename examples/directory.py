@@ -25,11 +25,15 @@ async def discover(environment: Environment, query: str) -> None:
     for item in response.items:
         if isinstance(item, ServiceResult):
             print(f"Service: {item.service.name} ({item.service.service_origin})")
+            print(f"Discovery document: {item.service.source.url}")
         elif isinstance(item, CollectionResult):
             print(
                 f"Collection: {item.collection.name} "
                 f"({item.collection.id}, through {item.service.service_origin})"
             )
+            if item.service.source.type != "odp":
+                print(f"Discovery document: {item.service.source.url}")
+                continue
             async with ServiceClient(item.service.service_origin) as service:
                 inspection = await service.inspect()
                 if any(

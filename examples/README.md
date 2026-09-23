@@ -39,6 +39,7 @@ uv run python examples/directory.py sandbox weather
 Use `production` for the production Directory. Omit `weather` to browse. This example requires a
 deployment with `/v1/directory/search`. It requests at most five mixed results, displays Service
 and Collection names, reports unusable or unknown results, and retrieves Collection details only
-after inspecting the owning Service's advertised anonymous support. It does not enroll, pay or
+for ODP sources after inspecting the owning Service's advertised anonymous support. Imported
+Collections print their exact document URL without ODP calls. It does not enroll, pay or
 invoke Actions. Unlike the local Service example above, this uses the real Directory.
 The server's bounded result list does not promise every matching result is included.

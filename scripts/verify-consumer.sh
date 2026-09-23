@@ -83,6 +83,14 @@ assert directory.__name__ == "offering_protocol.directory"
 assert service.__name__ == "offering_protocol.service"
 request = directory.ResourceSearchRequest(types=["collection"])
 assert request.to_dict() == {"types": ["collection"]}
+filters = directory.ServiceFilters(sources=["openapi"])
+assert filters.to_dict() == {"sources": ["openapi"]}
+source = directory.DirectorySource(type="openapi", url="https://example.com/api.json", x402_discovery=False)
+record = directory.DirectoryIndexedService(
+    indexed_at="2026-09-23T12:00:00Z", name="Example", service_id="example",
+    service_origin="https://example.com", source=source,
+)
+assert record.source.url == source.url and record.operations == []
 document = core.parse_service_document(
     b'{"description":"Consumer smoke test","http":{"endpoint_base":"/odp"},'
     b'"language":"en","localizations":["en"],"name":"Consumer",'

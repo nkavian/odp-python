@@ -20,6 +20,7 @@ from offering_protocol.directory.models import (
     ServiceResult,
     UnknownResult,
 )
+from offering_protocol.directory.sources import read_source, validate_imported_service
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
 
@@ -56,7 +57,7 @@ def _result(value: JsonValue) -> DirectoryResult:
     _text(service, "service_id", 128)
     _origin(service)
     _timestamp(service)
-    candidate = dict(service)
+    source = read_source(service.get("source"))
     for name in (
         "branding",
         "http",
@@ -65,7 +66,18 @@ def _result(value: JsonValue) -> DirectoryResult:
         "payment_origins",
         "search_capabilities",
     ):
-        candidate.pop(name, None)
+        service.pop(name, None)
+    if source.type == "odp":
+        _native_service(service)
+    else:
+        validate_imported_service(service)
+    raw["service"] = service
+    return _finish_result(raw, kind)
+
+
+def _native_service(service: dict[str, JsonValue]) -> None:
+    candidate = dict(service)
+    candidate.pop("source")
     document = parse_agent_service_document(
         json.dumps({**candidate, "odp_version": "1.0", "http": {"endpoint_base": "/"}})
     )
@@ -74,7 +86,9 @@ def _result(value: JsonValue) -> DirectoryResult:
         service.pop("protocols", None)
     else:
         service["protocols"] = document.protocols.to_dict()
-    raw["service"] = service
+
+
+def _finish_result(raw: dict[str, JsonValue], kind: str) -> DirectoryResult:
     if kind == "service":
         if "available_through" in raw:
             reference = _OBJECT.validate_python(raw["available_through"])
