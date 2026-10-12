@@ -7,6 +7,7 @@ import pytest
 from pydantic import JsonValue
 
 from helpers import QueueTransport, response
+from offering_protocol.core import PaymentOption, Protocol
 from offering_protocol.directory import (
     CollectionResult,
     DirectoryClient,
@@ -14,6 +15,7 @@ from offering_protocol.directory import (
     DirectoryService,
     Environment,
     IterationOptions,
+    PaymentFilter,
     ResourceSearchRequest,
     SearchRequest,
     ServiceFilters,
@@ -298,13 +300,23 @@ async def test_suggestion_filters() -> None:
     transport = transport_for({"items": ["Weather"]})
     client = DirectoryClient(transport=transport)
     request = SuggestionRequest(
-        prefix=" we ", limit=5, filters=ServiceFilters(keywords=["weather"])
+        prefix=" we ",
+        limit=5,
+        filters=ServiceFilters(
+            keywords=["weather"],
+            payments=[
+                PaymentFilter(name=Protocol.MPP, options=[PaymentOption.ARC, PaymentOption.MONAD])
+            ],
+        ),
     )
     assert await client.suggest(request) == ["Weather"]
     assert json.loads(transport.requests[0].body) == {
         "prefix": "we",
         "limit": 5,
-        "filters": {"keywords": ["weather"]},
+        "filters": {
+            "keywords": ["weather"],
+            "payments": [{"name": "mpp", "options": ["arc", "monad"]}],
+        },
     }
     assert request.prefix == " we "
     with pytest.raises(DirectoryError, match="do not support filters"):

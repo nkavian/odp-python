@@ -61,6 +61,24 @@ async def read(*services: object, **page: object) -> SearchPage:
     return await client(body).search_services(SearchRequest())
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("option", ["arc", "monad"])
+async def test_arc_and_monad_payment_metadata(option: str) -> None:
+    payment = {"authentication": "not-required", "name": "x402", "options": [option]}
+    page = await read(
+        amend(protocols={"payments": [payment]}),
+        facets={
+            "payments": [{"count": 1, "value": payment}],
+            "payment_options": [{"count": 1, "value": {"name": "x402", "option": option}}],
+        },
+    )
+    assert page.items[0].protocols is not None
+    assert page.facets is not None
+    assert page.items[0].protocols.payments[0].options == [option]
+    assert page.facets.payments[0].value.options == [option]
+    assert page.facets.payment_options[0].value.option == option
+
+
 # -- a record is validated before it is handed back ---------------------------------------
 
 

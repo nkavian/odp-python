@@ -9,6 +9,7 @@ from helpers import OFFERING, OFFERING_PAGE, SERVICE_DOCUMENT
 from offering_protocol.core import (
     OdpValidationError,
     Operation,
+    PaymentOption,
     Protocol,
     ReferenceError,
     ResourceType,
@@ -62,7 +63,7 @@ def test_normalizes_agent_response_capabilities() -> None:
                     {
                         "authentication": "not-required",
                         "name": "mpp",
-                        "options": ["inflow", "future"],
+                        "options": ["arc", "inflow", "monad", "future"],
                     }
                 ]
             },
@@ -86,7 +87,7 @@ def test_normalizes_agent_response_capabilities() -> None:
     assert service["operations"] == [{"authentication": "not-required", "name": "list-offerings"}]
     assert service["mcp"] == [{"type": "streamable-http", "url": "/mcp"}]
     assert "branding" not in service
-    assert service["protocols"]["payments"][0]["options"] == ["inflow"]
+    assert service["protocols"]["payments"][0]["options"] == ["arc", "inflow", "monad"]
     assert len(service["search_capabilities"]["filters"]["inline"]) == 1
     assert len(service["search_capabilities"]["sorts"]["inline"]) == 1
 
@@ -400,6 +401,28 @@ def test_parses_tap_trust_protocol() -> None:
     )
     assert document.protocols is not None
     assert document.protocols.trust[0].name.value == "tap"
+
+
+def test_parses_arc_and_monad_payment_options() -> None:
+    data = json.loads(SERVICE_DOCUMENT)
+    data["protocols"] = {
+        "payments": [
+            {"authentication": "not-required", "name": "x402", "options": ["arc", "monad"]}
+        ]
+    }
+    document = parse_service_document(json.dumps(data))
+    assert document.protocols is not None
+    assert document.protocols.payments[0].options == [PaymentOption.ARC, PaymentOption.MONAD]
+    assert parse_service_document(json.dumps(document.to_dict())).protocols == document.protocols
+    for count in [16, 17]:
+        data["protocols"]["payments"][0]["options"] = [
+            option.value for option in list(PaymentOption)[:count]
+        ]
+        if count == 16:
+            assert parse_service_document(json.dumps(data)).protocols is not None
+        else:
+            with pytest.raises(OdpValidationError):
+                parse_service_document(json.dumps(data))
 
 
 def test_agent_parser_filters_unknown_protocols_strictly() -> None:
