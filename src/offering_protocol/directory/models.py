@@ -30,7 +30,7 @@ class Environment(StrEnum):
     @property
     def origin(self) -> str:
         if self is Environment.PRODUCTION:
-            return "https://api.inflowpay.ai"
+            return "https://directory.offeringprotocol.org"
         return "https://sandbox.inflowpay.ai"
 
 

@@ -332,7 +332,7 @@ async def test_keeps_a_continuation_on_the_canonical_origin() -> None:
     await directory.continue_search_services("/v1/services/search?cursor=2")
 
     assert directory._transport.requests[0].url == (  # type: ignore[attr-defined]
-        "https://api.inflowpay.ai/v1/services/search?cursor=2"
+        "https://directory.offeringprotocol.org/v1/services/search?cursor=2"
     )
 
 
@@ -341,7 +341,7 @@ async def test_refuses_a_continuation_that_leaves_the_canonical_origin() -> None
     for reference in (
         "https://elsewhere.example/next",
         "//elsewhere.example/next",
-        "https://user@api.inflowpay.ai/next",
+        "https://user@directory.offeringprotocol.org/next",
         "mailto:someone@example.com",
     ):
         with pytest.raises(DirectoryError):
@@ -352,7 +352,7 @@ async def test_refuses_a_continuation_that_leaves_the_canonical_origin() -> None
     directory = client(json_response({"items": []}))
     await directory.continue_search_services("services?cursor=2")
     assert directory._transport.requests[0].url.startswith(  # type: ignore[attr-defined]
-        "https://api.inflowpay.ai/"
+        "https://directory.offeringprotocol.org/"
     )
 
 
