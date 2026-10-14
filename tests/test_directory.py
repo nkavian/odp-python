@@ -64,7 +64,7 @@ async def test_searches_continues_and_iterates_canonical_directory() -> None:
     assert first_page.items[0].name == "Indica Flowers"
     assert first_page.facets is not None
     assert first_page.facets.trust[0].value == TrustProtocol(name=Protocol.TAP)
-    assert transport.requests[0].url == "https://api.inflowpay.ai/v1/services/search"
+    assert transport.requests[0].url == "https://directory.offeringprotocol.org/v1/services/search"
     assert transport.requests[0].method == "POST"
     assert transport.requests[1].method == "GET"
     assert json.loads(transport.requests[0].body) == {

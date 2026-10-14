@@ -277,7 +277,10 @@ async def test_mixed_continuation_suggestions_and_request_validation() -> None:
     transport = transport_for({"items": ["Weather forecasts"]})
     names = await DirectoryClient(transport=transport).suggest(SuggestionRequest(prefix="we"))
     assert names == ["Weather forecasts"]
-    assert transport.requests[0].url == "https://api.inflowpay.ai/v1/directory/suggestions"
+    assert (
+        transport.requests[0].url
+        == "https://directory.offeringprotocol.org/v1/directory/suggestions"
+    )
     assert transport.requests[0].method == "POST"
     assert json.loads(transport.requests[0].body) == {"prefix": "we"}
     transport = transport_for({"items": []})
